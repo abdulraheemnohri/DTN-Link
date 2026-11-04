@@ -1,0 +1,11 @@
+[package]
+name = "dtn-identity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cryptographic node identities for DTN-Link"
+
+[dependencies]
+dtn-bpv7.workspace = true
+ed25519-dalek = { workspace = true, features = ["rand_core"] }
+rand.workspace = true

@@ -1,0 +1,22 @@
+# Daily automated maintenance run at 02:00 Asia/Karachi (21:00 UTC).
+# Keeps the repository continuously built, tested and audited.
+name: Daily Maintenance
+
+on:
+  schedule:
+    - cron: "0 21 * * *"   # 02:00 PKT (UTC+5)
+  workflow_dispatch:
+
+jobs:
+  build-test-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace
+      - name: Test
+        run: cargo test --workspace
+      - name: Security audit
+        run: cargo install cargo-audit --locked && cargo audit

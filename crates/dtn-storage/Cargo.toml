@@ -1,0 +1,10 @@
+[package]
+name = "dtn-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Persistent SQLite bundle store for DTN-Link"
+
+[dependencies]
+dtn-bpv7.workspace = true
+rusqlite.workspace = true

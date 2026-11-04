@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/dtn-bpv7",
+    "crates/dtn-identity",
+    "crates/dtn-storage",
+    "crates/dtn-core",
+    "cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/abdulraheemnohri/DTN-Link"
+
+[workspace.dependencies]
+dtn-bpv7 = { path = "crates/dtn-bpv7" }
+dtn-identity = { path = "crates/dtn-identity" }
+dtn-storage = { path = "crates/dtn-storage" }
+dtn-core = { path = "crates/dtn-core" }
+ed25519-dalek = "2"
+rand = "0.8"
+rusqlite = { version = "0.31", features = ["bundled"] }

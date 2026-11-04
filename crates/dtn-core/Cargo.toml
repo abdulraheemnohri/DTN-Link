@@ -1,0 +1,12 @@
+[package]
+name = "dtn-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DTN-Link node engine"
+
+[dependencies]
+dtn-bpv7.workspace = true
+dtn-identity.workspace = true
+dtn-storage.workspace = true
+rusqlite.workspace = true

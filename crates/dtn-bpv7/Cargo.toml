@@ -1,0 +1,7 @@
+[package]
+name = "dtn-bpv7"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bundle Protocol v7 (RFC 9171) core primitives for DTN-Link"

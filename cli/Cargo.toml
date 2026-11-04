@@ -1,0 +1,16 @@
+[package]
+name = "dtn-link-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DTN-Link command line interface"
+
+[[bin]]
+name = "dtn-link"
+path = "src/main.rs"
+
+[dependencies]
+dtn-bpv7.workspace = true
+dtn-core.workspace = true
+dtn-storage.workspace = true
+rusqlite.workspace = true
