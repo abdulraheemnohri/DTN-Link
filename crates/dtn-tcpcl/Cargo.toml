@@ -1,0 +1,9 @@
+[package]
+name = "dtn-tcpcl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TCP convergence transport for DTN-Link"
+
+[dependencies]
+dtn-bpv7.workspace = true

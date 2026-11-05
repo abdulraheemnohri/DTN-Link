@@ -12,5 +12,7 @@ path = "src/main.rs"
 [dependencies]
 dtn-bpv7.workspace = true
 dtn-core.workspace = true
+dtn-daemon.workspace = true
+dtn-routing.workspace = true
 dtn-storage.workspace = true
 rusqlite.workspace = true

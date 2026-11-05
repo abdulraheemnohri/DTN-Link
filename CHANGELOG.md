@@ -1,16 +1,22 @@
 # Changelog
 
+## 0.2.0 (2026-11-04)
+
+Phases 2-4 — multi-hop forwarding, hybrid routing, TCP transport.
+
+- dtn-routing: epidemic, spray-and-wait (bounded copy budget) and
+  opportunistic (encounter history) strategies, explainable decisions,
+  unit tests for each strategy.
+- dtn-core: `select_outbound(peer)` store-carry-forward selection;
+  multi-hop A→B→C test, partition/resume test, restart persistence test.
+- dtn-tcpcl: real TCP transport, length-prefixed frames, 16 MiB frame
+  limit, loopback transfer tests, oversized-frame rejection test.
+- dtn-daemon: TCP node daemon with peer sync loop and expiry cleanup;
+  two-node TCP delivery test and A→B→C multi-hop-over-TCP test.
+- cli: new `forward` (routing dry-run) and `daemon` commands.
+- docs: architecture updated with multi-hop flow and contact protocol.
+
 ## 0.1.0 (2026-11-04)
 
-Phase 1 — Rust core foundation.
-
-- dtn-bpv7: canonical CBOR encoder/decoder, BPv7 primary block, payload
-  block, EIDs (dtn/ipn), bundle ID, lifetime/expiry rules, unit tests.
-- dtn-identity: Ed25519 key pairs, sign/verify, deterministic seed.
-- dtn-storage: SQLite bundle store with duplicate suppression, delivery
-  receipts, expiry cleanup, indexed metadata.
-- dtn-core: Node engine (send/receive/inbox), two-node tests, restart
-  persistence test.
-- cli: dtn-link init/status/send/receive/bundles/decode/version.
-- CI: format, clippy, tests on every push; daily maintenance workflow at
-  02:00 PKT with cargo audit.
+Phase 1 — Rust core foundation (BPv7 CBOR, identity, SQLite store, node
+engine, CLI, CI).

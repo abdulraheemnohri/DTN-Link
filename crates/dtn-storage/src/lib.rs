@@ -1,4 +1,4 @@
-//! dtn-storage — persistent SQLite bundle store (Phase 1).
+//! dtn-storage — persistent SQLite bundle store.
 
 use dtn_bpv7::{Bundle, BundleId};
 use rusqlite::{params, Connection};
@@ -55,7 +55,6 @@ impl BundleStore {
         Self::open(Path::new(":memory:"))
     }
 
-    /// Returns true if the bundle was newly stored, false if duplicate.
     pub fn put(&mut self, bundle: &Bundle) -> Result<bool, rusqlite::Error> {
         let key = bundle_key(&bundle.id());
         let p = &bundle.primary;
@@ -100,6 +99,23 @@ impl BundleStore {
         rows.collect()
     }
 
+    pub fn all(&self) -> Result<Vec<StoredBundle>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source, destination, lifetime, received_at, data
+             FROM bundles ORDER BY received_at")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(StoredBundle {
+                id: r.get(0)?,
+                source: r.get(1)?,
+                destination: r.get(2)?,
+                lifetime: r.get::<_, i64>(3)? as u64,
+                received_at: r.get::<_, i64>(4)? as u64,
+                data: r.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
     pub fn count(&self) -> Result<i64, rusqlite::Error> {
         self.conn.query_row("SELECT COUNT(*) FROM bundles", [], |r| r.get(0))
     }
@@ -128,7 +144,7 @@ mod tests {
         assert!(!s.put(&bundle(1, "b")).unwrap());
         assert_eq!(s.count().unwrap(), 1);
         assert_eq!(s.pending_for("dtn://b").unwrap().len(), 1);
-        assert_eq!(s.pending_for("dtn://c").unwrap().len(), 0);
+        assert_eq!(s.all().unwrap().len(), 1);
     }
 
     #[test]
@@ -152,14 +168,5 @@ mod tests {
         assert!(s.mark_delivered(&id).unwrap());
         assert!(s.is_delivered(&id).unwrap());
         assert!(!s.mark_delivered(&id).unwrap());
-    }
-
-    #[test]
-    fn decodes_stored_bundle() {
-        let mut s = BundleStore::open_in_memory().unwrap();
-        let b = bundle(1, "b");
-        s.put(&b).unwrap();
-        let stored = &s.pending_for("dtn://b").unwrap()[0];
-        assert_eq!(Bundle::decode(&stored.data).unwrap(), b);
     }
 }

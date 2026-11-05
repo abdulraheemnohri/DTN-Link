@@ -8,5 +8,6 @@ description = "DTN-Link node engine"
 [dependencies]
 dtn-bpv7.workspace = true
 dtn-identity.workspace = true
+dtn-routing.workspace = true
 dtn-storage.workspace = true
 rusqlite.workspace = true

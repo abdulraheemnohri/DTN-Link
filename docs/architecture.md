@@ -6,62 +6,69 @@
 2. Identity layer — Ed25519 node identities
 3. Bundle layer — BPv7 (RFC 9171) creation/validation
 4. Security layer — BPSec (RFC 9172) [planned]
-5. Routing layer — epidemic, spray-and-wait, opportunistic [planned]
-6. Storage layer — persistent SQLite queue with dedup + expiry
-7. Convergence layer — transport adapters (BLE, Wi-Fi Direct, TCPCLv4, LoRa, ...) [planned]
+5. Routing layer — epidemic, spray-and-wait, opportunistic [implemented]
+6. Storage layer — persistent SQLite queue with dedup + expiry [implemented]
+7. Convergence layer — transports [TCPCL-lite implemented; BLE/Wi-Fi Direct planned]
 8. Gateway layer — internet/satellite gateways [planned]
 9. Management layer — monitoring, diagnostics, configuration [planned]
 
-## Phase 1 (implemented here)
+## Current implementation (Phases 1-4)
 
 ```
-+---------------------------------------------------+
-| cli (dtn-link init/status/send/receive/bundles)    |
-+---------------------------------------------------+
-| dtn-core: Node { identity, store, seq }            |
-|   send()     -> Bundle -> store                    |
-|   receive(wire) -> decode -> dedup -> store        |
-|   inbox()    -> bundles for this EID, not delivered |
-+----------+----------------+-----------------------+
-| dtn-identity (Ed25519) | dtn-storage (SQLite)      |
-+----------+----------------+-----------------------+
-| dtn-bpv7: CBOR, PrimaryBlock, CanonicalBlock, Eid  |
-+---------------------------------------------------+
++--------------------------------------------------------+
+| cli: init/status/send/receive/bundles/forward/daemon    |
++--------------------------------------------------------+
+| dtn-daemon: TCP listener + peer sync loop (contacts)   |
++--------------------------------------------------------+
+| dtn-core: Node                                          |
+|   send()        -> Bundle -> store                      |
+|   receive(wire) -> decode -> dedup -> store              |
+|   select_outbound(peer) -> routing decisions + bundles   |
++----------+---------------+---------------+--------------+
+| dtn-routing | dtn-identity | dtn-storage (SQLite)      |
++----------+---------------+---------------+--------------+
+| dtn-tcpcl: length-prefixed frames over TCP              |
++--------------------------------------------------------+
+| dtn-bpv7: CBOR, PrimaryBlock, CanonicalBlock, Eid       |
++--------------------------------------------------------+
 ```
 
-### Bundle wire format
+### Multi-hop flow
 
-A bundle is a CBOR array: `[ primary_block, canonical_block... ]`.
+1. A creates a bundle for C and gives it to B (any transport).
+2. B `receive()`: decodes, checks expiry, dedups, stores. Bundle is NOT for
+   B, so it simply waits (store-carry-forward).
+3. Later, on a contact with C, `select_outbound(C)` consults the routing
+   engine; if the decision is `forward`, the bundle is sent.
+4. C receives, stores, and the bundle appears in C's inbox.
+5. Dedup via (source EID, creation timestamp) prevents loops and repeats.
 
-Primary block (9 elements, CRC fields omitted while crc_type = 0):
+### Routing strategies
 
-```
-[version(7), control_flags, crc_type,
- destination_eid, source_node_eid, report_to_eid,
- [creation_ts_secs, creation_ts_seqno],
- lifetime, hop_count]
-```
+- **Epidemic** — replicate every stored bundle to every encountered peer.
+- **Spray-and-Wait** — fixed copy budget per bundle (default 8); refuses
+  further copies once exhausted.
+- **Opportunistic** — forward only to peers with encounter history
+  (≥ 2 recorded contacts).
 
-Payload block: `[type_code=1, block_number=1, control_flags=0, bytes]`.
+Every decision carries an explainable reason string.
 
-Bundle ID = (source EID, creation timestamp) — used for duplicate
-detection in the store (`bundles.id` primary key).
+### Contact protocol (TCPCL-lite frames)
 
-### Storage schema (schema version 1)
+Frame = `[u32 BE length][bytes]`, zero-length = end-of-batch.
 
-- `bundles(id PK, source, destination, creation_ts_secs, creation_ts_seq, lifetime, received_at, data BLOB)`
-- `delivered(id PK, delivered_at)`
-- `schema_migrations(version PK, applied_at)`
-- indexes: `idx_bundles_dest(destination)`, `idx_bundles_expiry(creation_ts_secs, lifetime)`
+1. Hello: each side sends its EID URI as one text frame.
+2. Each side sends selected outbound bundles (one frame each), then
+   end-of-batch.
+3. Each side reads frames until end-of-batch, dedups and stores.
 
-### Honest limitations (Phase 1)
-
-- No physical transports yet: bundles move via CLI stdin/stdout or the store.
-- No BPSec yet: payloads are not yet end-to-end encrypted on the wire.
-- EIDs are not identity proof; signatures exist but wire binding comes with BPSec.
-- Expiry uses wall-clock seconds since Unix epoch.
+Honest limitation: this is not yet full RFC 9174 (no session flags,
+keepalives or XFER acknowledgements); it is a real, working TCP transport.
 
 ## Roadmap
 
-Phases 2-12 follow the master plan: multi-hop forwarding, hybrid routing,
-TCPCLv4 + BLE transports, then platform apps and gateways.
+- Phase 5: BPSec — signed/encrypted bundles on the wire.
+- Phase 6: BLE + Wi-Fi Direct adapters, discovery.
+- Phases 7-9: platform apps.
+- Phase 10: serial/LoRa adapters.
+- Phase 11: gateways. Phase 12: interop + performance testing.
