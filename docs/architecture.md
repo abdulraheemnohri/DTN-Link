@@ -3,35 +3,53 @@
 ## Layered model (target)
 
 1. Application layer — messaging, files, alerts
-2. Identity layer — Ed25519 node identities
-3. Bundle layer — BPv7 (RFC 9171) creation/validation
-4. Security layer — BPSec (RFC 9172) [planned]
+2. Identity layer — Ed25519 node identities [implemented]
+3. Bundle layer — BPv7 (RFC 9171) creation/validation [implemented]
+4. Security layer — BPSec (RFC 9172) [BIB integrity implemented]
 5. Routing layer — epidemic, spray-and-wait, opportunistic [implemented]
 6. Storage layer — persistent SQLite queue with dedup + expiry [implemented]
 7. Convergence layer — transports [TCPCL-lite implemented; BLE/Wi-Fi Direct planned]
 8. Gateway layer — internet/satellite gateways [planned]
 9. Management layer — monitoring, diagnostics, configuration [planned]
 
-## Current implementation (Phases 1-4)
+## Current implementation (Phases 1-5)
 
 ```
 +--------------------------------------------------------+
-| cli: init/status/send/receive/bundles/forward/daemon    |
+| cli: init/status/send/receive/bundles/forward/daemon/   |
+|     verify/decode                                        |
 +--------------------------------------------------------+
 | dtn-daemon: TCP listener + peer sync loop (contacts)   |
 +--------------------------------------------------------+
+| dtn-bpsec: BIB (type 11) Ed25519 signature block        |
++--------------------------------------------------------+
 | dtn-core: Node                                          |
 |   send()        -> Bundle -> store                      |
-|   receive(wire) -> decode -> dedup -> store              |
+|   receive(wire) -> decode -> dedup -> store             |
 |   select_outbound(peer) -> routing decisions + bundles   |
-+----------+---------------+---------------+--------------+
++----------+---------------+---------------+-------------+
 | dtn-routing | dtn-identity | dtn-storage (SQLite)      |
-+----------+---------------+---------------+--------------+
++----------+---------------+---------------+-------------+
 | dtn-tcpcl: length-prefixed frames over TCP              |
 +--------------------------------------------------------+
-| dtn-bpv7: CBOR, PrimaryBlock, CanonicalBlock, Eid       |
+| dtn-bpv7: CBOR, PrimaryBlock, CanonicalBlock, Eid      |
 +--------------------------------------------------------+
 ```
+
+### Security model (Phase 5)
+
+- **Integrity**: `dtn_bpsec::sign_bundle` appends a Block Integrity
+  Block (BPSec type 11) containing an Ed25519 signature over the
+  payload bytes. `verify_bundle` checks it against a VerifyingKey and
+  returns Valid / NoIntegrityBlock / Invalid / MultipleIntegrityBlocks.
+- Tampering with payload or signature → Invalid. Wrong key → Invalid.
+- **Honest scope**: RFC 9173 default contexts (HMAC-SHA256) and the
+  Block Confidentiality Block (BCB) are not yet implemented. The
+  Ed25519 context provides public-key integrity without a shared
+  secret. Application-layer end-to-end encryption and key discovery
+  (knowing which key belongs to which node) are planned next.
+- A DTN endpoint identifier is NOT proof of identity; only signature
+  verification against a known key is.
 
 ### Multi-hop flow
 
@@ -67,7 +85,7 @@ keepalives or XFER acknowledgements); it is a real, working TCP transport.
 
 ## Roadmap
 
-- Phase 5: BPSec — signed/encrypted bundles on the wire.
+- Phase 5 (done): BPSec integrity. Next: BCB confidentiality + RFC 9173 contexts.
 - Phase 6: BLE + Wi-Fi Direct adapters, discovery.
 - Phases 7-9: platform apps.
 - Phase 10: serial/LoRa adapters.

@@ -15,4 +15,6 @@ dtn-core.workspace = true
 dtn-daemon.workspace = true
 dtn-routing.workspace = true
 dtn-storage.workspace = true
+dtn-bpsec.workspace = true
+ed25519-dalek.workspace = true
 rusqlite.workspace = true

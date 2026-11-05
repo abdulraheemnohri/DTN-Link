@@ -1,0 +1,11 @@
+[package]
+name = "dtn-bpsec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bundle security (BPSec-aligned integrity) for DTN-Link"
+
+[dependencies]
+dtn-bpv7.workspace = true
+dtn-identity.workspace = true
+ed25519-dalek.workspace = true

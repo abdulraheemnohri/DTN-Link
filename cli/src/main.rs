@@ -1,4 +1,4 @@
-//! dtn-link CLI (Phases 1-4).
+//! dtn-link CLI (Phases 1-5).
 
 use dtn_bpv7::{Bundle, Eid};
 use dtn_core::Node;
@@ -116,6 +116,43 @@ fn main() {
             };
             dtn_daemon::run(cfg).expect("daemon failed");
         }
+        Some("verify") => {
+            // usage: dtn-link verify <pubkey-32-byte-hex>   (bundle bytes on stdin)
+            let key_hex = match args.get(1) {
+                Some(k) => k.clone(),
+                None => {
+                    eprintln!("usage: dtn-link verify <pubkey-32-byte-hex> < bundle.bin");
+                    std::process::exit(2);
+                }
+            };
+            let key_bytes = hex_to_32(&key_hex).unwrap_or_else(|| {
+                eprintln!("error: pubkey must be 64 hex characters (32 bytes)");
+                std::process::exit(2);
+            });
+            let key = ed25519_dalek::VerifyingKey::from_bytes(&key_bytes).expect("invalid key");
+            let mut wire = Vec::new();
+            std::io::stdin().read_to_end(&mut wire).expect("stdin");
+            let bundle = Bundle::decode(&wire).unwrap_or_else(|e| {
+                eprintln!("invalid bundle: {e}");
+                std::process::exit(1);
+            });
+            match dtn_bpsec::verify_bundle(&bundle, &key) {
+                dtn_bpsec::VerifyOutcome::Valid => {
+                    println!("VALID — signature verified");
+                }
+                dtn_bpsec::VerifyOutcome::Invalid => {
+                    println!("INVALID — signature does not match (tampered or wrong key)");
+                    std::process::exit(1);
+                }
+                dtn_bpsec::VerifyOutcome::NoIntegrityBlock => {
+                    println!("UNSIGNED — bundle carries no integrity block");
+                }
+                dtn_bpsec::VerifyOutcome::MultipleIntegrityBlocks => {
+                    println!("MALFORMED — multiple integrity blocks");
+                    std::process::exit(1);
+                }
+            }
+        }
         Some("decode") => {
             let mut wire = Vec::new();
             std::io::stdin().read_to_end(&mut wire).expect("stdin");
@@ -127,12 +164,35 @@ fn main() {
                 }
             }
         }
-        Some("version") => println!("dtn-link 0.2.0 (BPv7, phases 1-4)"),
+        Some("version") => println!("dtn-link 0.3.0 (BPv7, phases 1-5)"),
         _ => {
             eprintln!(
-                "dtn-link — decentralized DTN communication (phases 1-4)\nusage:\n  dtn-link init [node-number]\n  dtn-link status\n  dtn-link send <dtn://dest> <message> [lifetime-seconds]\n  dtn-link receive        (bundle bytes on stdin)\n  dtn-link bundles\n  dtn-link forward <dtn://peer> [strategy]\n  dtn-link daemon --listen 0.0.0.0:4556 [--peers host:port,...] [--strategy epidemic|spray|opportunistic] [--interval 30]\n  dtn-link decode         (bundle bytes on stdin, prints structure)\n  dtn-link version"
+                "dtn-link — decentralized DTN communication (phases 1-5)
+usage:
+  dtn-link init [node-number]
+  dtn-link status
+  dtn-link send <dtn://dest> <message> [lifetime-seconds]
+  dtn-link receive        (bundle bytes on stdin)
+  dtn-link bundles
+  dtn-link forward <dtn://peer> [strategy]
+  dtn-link daemon --listen 0.0.0.0:4556 [--peers host:port,...] [--strategy epidemic|spray|opportunistic] [--interval 30]
+  dtn-link verify <pubkey-hex>   (bundle bytes on stdin)
+  dtn-link decode         (bundle bytes on stdin, prints structure)
+  dtn-link version"
             );
             std::process::exit(2);
         }
     }
+}
+
+fn hex_to_32(s: &str) -> Option<[u8; 32]> {
+    let s = s.trim();
+    if s.len() != 64 || !s.chars().all(|c| c.is_ascii_hexdigit()) { return None; }
+    let mut out = [0u8; 32];
+    for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
+        let hi = (chunk[0] as char).to_digit(16).unwrap() as u8;
+        let lo = (chunk[1] as char).to_digit(16).unwrap() as u8;
+        out[i] = (hi << 4) | lo;
+    }
+    Some(out)
 }

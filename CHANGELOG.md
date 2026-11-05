@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.0 (2026-11-05)
+
+Phase 5 — bundle security (BPSec-aligned integrity).
+
+- dtn-bpsec: Block Integrity Block (type 11) carrying an Ed25519
+  signature over the payload; sign_bundle / verify_bundle with
+  Valid / NoIntegrityBlock / Invalid / MultipleIntegrityBlocks
+  outcomes; tests for tampered payload, tampered signature, wrong
+  key, unsigned bundles and malformed multi-BIB bundles.
+- cli: new `verify <pubkey-hex>` command that checks a bundle from
+  stdin against a public key.
+- Honest scope: RFC 9173 contexts (HMAC) and BCB confidentiality
+  are the next milestone; this block uses an Ed25519 context.
+
 ## 0.2.0 (2026-11-04)
 
 Phases 2-4 — multi-hop forwarding, hybrid routing, TCP transport.

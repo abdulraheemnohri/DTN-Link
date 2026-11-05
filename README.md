@@ -9,7 +9,7 @@ without requiring a SIM card, cellular subscription or Wi-Fi router for every
 communication. It uses Bundle Protocol v7 (RFC 9171), store-carry-forward
 routing, modular physical transport adapters and optional internet gateways.
 
-## Status: Phases 1-4 (Rust core + TCP transport)
+## Status: Phases 1-5 (Rust core + TCP transport + BPSec integrity)
 
 | Component | Status |
 |---|---|
@@ -19,9 +19,10 @@ routing, modular physical transport adapters and optional internet gateways.
 | Hybrid routing (epidemic / spray-and-wait / opportunistic) | implemented (crates/dtn-routing) |
 | Multi-hop store-carry-forward (A→B→C) | implemented + tested (crates/dtn-core) |
 | TCP transport + daemon (TCPCL-lite) | implemented + tested (crates/dtn-tcpcl, dtn-daemon) |
-| CLI | implemented — init/status/send/receive/bundles/forward/daemon/decode |
+| BPSec bundle integrity (RFC 9172-aligned BIB, Ed25519) | implemented + tested (crates/dtn-bpsec) |
+| CLI | implemented — init/status/send/receive/bundles/forward/daemon/verify/decode |
 | Full RFC 9174 TCPCLv4 session protocol | next milestone |
-| BPSec (RFC 9172) | Phase 5 |
+| BPSec confidentiality (BCB) + RFC 9173 contexts | next milestone |
 | Bluetooth / Wi-Fi Direct transports | Phase 6 |
 | Android / iOS / Windows / Linux apps | Phases 7-9 |
 | LoRa / radio / serial adapters | Phase 10 |
@@ -56,7 +57,7 @@ See [docs/architecture.md](docs/architecture.md).
 ## Standards
 
 - RFC 9171 — Bundle Protocol v7
-- RFC 9172 — Bundle Protocol Security (planned)
+- RFC 9172 — Bundle Protocol Security (BIB integrity block implemented; Ed25519 context)
 - RFC 9173 — Default Security Contexts (planned)
 - RFC 9174 — TCP Convergence Layer v4 (TCPCL-lite implemented; full session protocol next)
 
