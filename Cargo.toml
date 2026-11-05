@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/abdulraheemnohri/DTN-Link"
@@ -28,5 +28,6 @@ dtn-tcpcl = { path = "crates/dtn-tcpcl" }
 dtn-daemon = { path = "crates/dtn-daemon" }
 dtn-bpsec = { path = "crates/dtn-bpsec" }
 ed25519-dalek = "2"
+aes-gcm = "0.10"
 rand = "0.8"
 rusqlite = { version = "0.31", features = ["bundled"] }

@@ -12,7 +12,7 @@
 8. Gateway layer — internet/satellite gateways [planned]
 9. Management layer — monitoring, diagnostics, configuration [planned]
 
-## Current implementation (Phases 1-5)
+## Current implementation (Phases 1-6)
 
 ```
 +--------------------------------------------------------+
@@ -21,7 +21,7 @@
 +--------------------------------------------------------+
 | dtn-daemon: TCP listener + peer sync loop (contacts)   |
 +--------------------------------------------------------+
-| dtn-bpsec: BIB (type 11) Ed25519 signature block        |
+| dtn-bpsec: BIB (type 11) Ed25519 sig + BCB (type 12)   |
 +--------------------------------------------------------+
 | dtn-core: Node                                          |
 |   send()        -> Bundle -> store                      |
@@ -36,18 +36,21 @@
 +--------------------------------------------------------+
 ```
 
-### Security model (Phase 5)
+### Security model (Phases 5-6)
 
 - **Integrity**: `dtn_bpsec::sign_bundle` appends a Block Integrity
   Block (BPSec type 11) containing an Ed25519 signature over the
   payload bytes. `verify_bundle` checks it against a VerifyingKey and
   returns Valid / NoIntegrityBlock / Invalid / MultipleIntegrityBlocks.
 - Tampering with payload or signature → Invalid. Wrong key → Invalid.
-- **Honest scope**: RFC 9173 default contexts (HMAC-SHA256) and the
-  Block Confidentiality Block (BCB) are not yet implemented. The
-  Ed25519 context provides public-key integrity without a shared
-  secret. Application-layer end-to-end encryption and key discovery
-  (knowing which key belongs to which node) are planned next.
+- **Confidentiality**: `dtn_bpsec::bcb::encrypt_bundle` replaces the
+  payload with AES-256-GCM ciphertext and appends a BCB (type 12)
+  holding the nonce; `decrypt_bundle` restores the plaintext with the
+  shared 32-byte key and returns typed errors on wrong key or tampering.
+  Wrong key, tampered ciphertext or tampered nonce all fail closed.
+- **Honest scope**: RFC 9173 context identifiers, AAD scope over the
+  primary block, and key distribution/rotation (knowing which key
+  belongs to which node) are planned next.
 - A DTN endpoint identifier is NOT proof of identity; only signature
   verification against a known key is.
 
@@ -85,7 +88,7 @@ keepalives or XFER acknowledgements); it is a real, working TCP transport.
 
 ## Roadmap
 
-- Phase 5 (done): BPSec integrity. Next: BCB confidentiality + RFC 9173 contexts.
+- Phase 5 (done): BPSec integrity. Phase 6-security (done): BCB confidentiality. Next: RFC 9173 contexts + key distribution.
 - Phase 6: BLE + Wi-Fi Direct adapters, discovery.
 - Phases 7-9: platform apps.
 - Phase 10: serial/LoRa adapters.

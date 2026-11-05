@@ -1,4 +1,4 @@
-//! dtn-link CLI (Phases 1-5).
+//! dtn-link CLI (Phases 1-6).
 
 use dtn_bpv7::{Bundle, Eid};
 use dtn_core::Node;
@@ -153,6 +153,59 @@ fn main() {
                 }
             }
         }
+        Some("encrypt") => {
+            // usage: dtn-link encrypt <key-32-byte-hex>   (bundle bytes on stdin, encrypted bundle on stdout)
+            let key = match args.get(1).and_then(|k| hex_to_32(k)) {
+                Some(k) => k,
+                None => {
+                    eprintln!("usage: dtn-link encrypt <key-64-hex-chars> < bundle.bin > encrypted.bin");
+                    std::process::exit(2);
+                }
+            };
+            let mut wire = Vec::new();
+            std::io::stdin().read_to_end(&mut wire).expect("stdin");
+            let bundle = Bundle::decode(&wire).unwrap_or_else(|e| {
+                eprintln!("invalid bundle: {e}");
+                std::process::exit(1);
+            });
+            // Deterministic-per-run random nonce from OS entropy.
+            let mut nonce = [0u8; 12];
+            std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut nonce))
+                .or_else(|_| {
+                    use std::time::{SystemTime, UNIX_EPOCH};
+                    let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+                    nonce.copy_from_slice(&t.to_le_bytes());
+                    Ok(())
+                })
+                .ok();
+            let enc = dtn_bpsec::bcb::encrypt_bundle(&bundle, &key, &nonce);
+            std::io::Write::write_all(&mut std::io::stdout(), &enc.encode()).expect("stdout");
+        }
+        Some("decrypt") => {
+            // usage: dtn-link decrypt <key-32-byte-hex>   (encrypted bundle on stdin, plaintext bundle on stdout)
+            let key = match args.get(1).and_then(|k| hex_to_32(k)) {
+                Some(k) => k,
+                None => {
+                    eprintln!("usage: dtn-link decrypt <key-64-hex-chars> < encrypted.bin > bundle.bin");
+                    std::process::exit(2);
+                }
+            };
+            let mut wire = Vec::new();
+            std::io::stdin().read_to_end(&mut wire).expect("stdin");
+            let bundle = Bundle::decode(&wire).unwrap_or_else(|e| {
+                eprintln!("invalid bundle: {e}");
+                std::process::exit(1);
+            });
+            match dtn_bpsec::bcb::decrypt_bundle(&bundle, &key) {
+                Ok(plain) => {
+                    std::io::Write::write_all(&mut std::io::stdout(), &plain.encode()).expect("stdout");
+                }
+                Err(e) => {
+                    eprintln!("decrypt failed: {e:?}");
+                    std::process::exit(1);
+                }
+            }
+        }
         Some("decode") => {
             let mut wire = Vec::new();
             std::io::stdin().read_to_end(&mut wire).expect("stdin");
@@ -164,10 +217,10 @@ fn main() {
                 }
             }
         }
-        Some("version") => println!("dtn-link 0.3.0 (BPv7, phases 1-5)"),
+        Some("version") => println!("dtn-link 0.4.0 (BPv7, phases 1-6: integrity + confidentiality)"),
         _ => {
             eprintln!(
-                "dtn-link — decentralized DTN communication (phases 1-5)
+                "dtn-link — decentralized DTN communication (phases 1-6)
 usage:
   dtn-link init [node-number]
   dtn-link status

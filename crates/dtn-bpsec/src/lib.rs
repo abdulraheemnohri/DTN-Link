@@ -1,15 +1,21 @@
-//! dtn-bpsec — bundle security (Phase 5).
+//! dtn-bpsec — bundle security (Phases 5-6).
 //!
-//! Implements a BPSec (RFC 9172)-aligned Block Integrity Block (BIB):
-//! type_code 11, Ed25519 signature over the payload bytes. This is
-//! real end-to-end integrity: any tampering with the payload or the
-//! signature makes verification fail.
+//! Two BPSec (RFC 9172)-aligned security blocks:
+//!
+//! - Block Integrity Block (BIB, type 11): Ed25519 signature over the
+//!   payload bytes. Any tampering with the payload or the signature
+//!   makes verification fail. See [verify_bundle].
+//! - Block Confidentiality Block (BCB, type 12): AES-256-GCM payload
+//!   encryption, so the plaintext never appears on the wire.
+//!   See [bcb].
 //!
 //! Honest scope note: full RFC 9173 mandates specific security contexts
-//! (HMAC-SHA256, AES-GCM). This block uses an Ed25519 signature context
-//! instead, which provides equivalent integrity with public-key
-//! verification (no shared secret needed). Confidentiality (BCB) comes
-//! in the next milestone.
+//! (HMAC-SHA256, AES-GCM with AAD scopes). The BIB uses an Ed25519
+//! signature context (public-key integrity, no shared secret needed)
+//! and the BCB encrypts the payload scope only. Key distribution and
+//! the RFC 9173 context identifiers themselves are future work.
+
+pub mod bcb;
 
 use dtn_bpv7::{Bundle, CanonicalBlock};
 use dtn_identity::NodeIdentity;

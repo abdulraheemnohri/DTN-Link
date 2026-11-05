@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.0 (2026-11-05)
+
+Phase 6 (security part 2) — bundle confidentiality.
+
+- dtn-bpsec::bcb: Block Confidentiality Block (RFC 9172 type 12)
+  with AES-256-GCM payload encryption; 12-byte nonce + ciphertext +
+  GCM tag stored in the BCB; the payload block is replaced by the
+  ciphertext so plaintext never appears on the wire.
+- decrypt_bundle returns typed errors: NoConfidentialityBlock /
+  MultipleConfidentialityBlocks / Malformed / DecryptionFailed.
+- 9 BCB tests: roundtrip (incl. wire), wrong key, tampered ciphertext,
+  tampered nonce, unencrypted bundle, multi-BCB, malformed, and a
+  wire test asserting the plaintext is absent from encoded bytes.
+- cli: new `encrypt <key-hex>` and `decrypt <key-hex>` commands.
+- Honest scope: key distribution/rotation and RFC 9173 context
+  identifiers are future work.
+
 ## 0.3.0 (2026-11-05)
 
 Phase 5 — bundle security (BPSec-aligned integrity).
