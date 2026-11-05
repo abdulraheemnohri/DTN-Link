@@ -1,14 +1,14 @@
-//! dtn-daemon — a real TCP DTN node (Phase 4 transport).
+//! dtn-daemon — a real TCP DTN node.
 //!
-//! Protocol per contact (TCPCL-lite frames):
-//!   1. both sides send a hello frame: their EID URI as UTF-8 text
-//!   2. each side sends its selected outbound bundles, then end-of-batch
-//!   3. each side receives the peer's bundles, dedups and stores them
-//!   4. connection closes; contacts repeat on the sync interval
+//! Two contact protocols are supported:
+//!   * TCPCL-lite (`exchange`, Phase 4): length-prefixed frames.
+//!   * RFC 9174 TCPCLv4 (`exchange_v4`, Phase 7): full session
+//!     handshake, keepalives, acknowledged transfers, SESS_TERM.
 
 use dtn_bpv7::Eid;
 use dtn_core::Node;
 use dtn_routing::Strategy;
+use dtn_tcpcl::v4::{Event, Session, SessionError, TERM_OTHER};
 use dtn_tcpcl::{read_frame, write_end_of_batch, write_frame, FrameError};
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
@@ -29,7 +29,7 @@ fn parse_eid(bytes: &[u8]) -> Eid {
     Eid::dtn(s.trim().trim_start_matches("dtn://").trim_end_matches('/'))
 }
 
-/// Exchange bundles with a connected peer stream.
+/// Exchange bundles with a connected peer stream (TCPCL-lite).
 pub fn exchange(node: &Arc<Mutex<Node>>, stream: &mut TcpStream) -> Result<Eid, FrameError> {
     let our_eid = node.lock().unwrap().eid();
     write_frame(stream, our_eid.as_uri().as_bytes())?;
@@ -57,6 +57,54 @@ pub fn exchange(node: &Arc<Mutex<Node>>, stream: &mut TcpStream) -> Result<Eid, 
         }
     }
     Ok(peer)
+}
+
+/// Exchange bundles with a peer over a full RFC 9174 TCPCLv4 session:
+/// contact handshake, acknowledged outbound transfers, inbound bundles
+/// stored through the node engine, then clean SESS_TERM shutdown.
+/// Returns the peer's session EID.
+pub fn exchange_v4(node: &Arc<Mutex<Node>>, stream: TcpStream, active: bool) -> Result<String, SessionError> {
+    let local_eid = node.lock().unwrap().eid();
+    let local_uri = local_eid.as_uri();
+    let mut sess = Session::new(stream, &local_uri, 30);
+    sess.handshake(active)?;
+    let peer_eid = String::from_utf8_lossy(&sess.peer_eid).into_owned();
+
+    let peer = parse_eid(peer_eid.as_bytes());
+    let outbound = {
+        let mut n = node.lock().unwrap();
+        n.select_outbound(&peer).unwrap_or_default()
+    };
+    for ob in &outbound {
+        let tid = sess.send_bundle(&ob.bundle.encode())?;
+        loop {
+            match sess.pump()? {
+                Some(Event::Bundle(bytes)) => {
+                    let mut n = node.lock().unwrap();
+                    let _ = n.receive(&bytes);
+                }
+                Some(Event::Acked { transfer_id, .. }) if transfer_id == tid => break,
+                Some(Event::Terminated { .. }) => break,
+                Some(_) => {}
+                None => {}
+            }
+        }
+    }
+    sess.send_sess_term(0, TERM_OTHER)?;
+
+    loop {
+        match sess.pump() {
+            Ok(Some(Event::Bundle(bytes))) => {
+                let mut n = node.lock().unwrap();
+                let _ = n.receive(&bytes);
+            }
+            Ok(Some(Event::Terminated { .. })) => break,
+            Ok(_) => {}
+            Err(SessionError::Closed) => break,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(peer_eid)
 }
 
 fn serve(node: Arc<Mutex<Node>>, listener: TcpListener) {
@@ -196,5 +244,62 @@ mod tests {
         let delivered = rx.recv_timeout(Duration::from_secs(10)).unwrap();
         assert_eq!(delivered, 1, "multi-hop bundle must reach C over TCP");
         server_c.join().unwrap();
+    }
+
+    #[test]
+    fn tcpclv4_session_delivers_bundle() {
+        use std::sync::mpsc;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let node = Arc::new(Mutex::new(
+                Node::open(2, &PathBuf::from(":memory:"), Strategy::Epidemic).unwrap()));
+            let (stream, _) = listener.accept().unwrap();
+            exchange_v4(&node, stream, false).unwrap();
+            let n = node.lock().unwrap();
+            tx.send(n.inbox().unwrap().len()).unwrap();
+        });
+
+        let node_a = Arc::new(Mutex::new(
+            Node::open(1, &PathBuf::from(":memory:"), Strategy::Epidemic).unwrap()));
+        node_a.lock().unwrap().send(Eid::ipn(2, 0), b"tcpclv4 wire".to_vec(), 3600).unwrap();
+        let stream = TcpStream::connect(addr).unwrap();
+        exchange_v4(&node_a, stream, true).unwrap();
+
+        let delivered = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(delivered, 1, "bundle must be delivered over TCPCLv4");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn tcpclv4_session_two_way_exchange() {
+        use std::sync::mpsc;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let node = Arc::new(Mutex::new(
+                Node::open(2, &PathBuf::from(":memory:"), Strategy::Epidemic).unwrap()));
+            node.lock().unwrap().send(Eid::ipn(1, 0), b"from b over v4".to_vec(), 3600).unwrap();
+            let (stream, _) = listener.accept().unwrap();
+            exchange_v4(&node, stream, false).unwrap();
+            let n = node.lock().unwrap();
+            tx.send(n.inbox().unwrap().len()).unwrap();
+        });
+
+        let node_a = Arc::new(Mutex::new(
+            Node::open(1, &PathBuf::from(":memory:"), Strategy::Epidemic).unwrap()));
+        node_a.lock().unwrap().send(Eid::ipn(2, 0), b"from a over v4".to_vec(), 3600).unwrap();
+        let stream = TcpStream::connect(addr).unwrap();
+        exchange_v4(&node_a, stream, true).unwrap();
+
+        let delivered = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(delivered, 1, "A's bundle must reach B over TCPCLv4");
+        server.join().unwrap();
+        assert_eq!(node_a.lock().unwrap().inbox().unwrap().len(), 1,
+            "B's bundle must reach A over TCPCLv4");
     }
 }

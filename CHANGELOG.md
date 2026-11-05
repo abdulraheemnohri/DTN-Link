@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.5.0 (2026-11-05)
+
+Phase 7 — full RFC 9174 TCPCLv4 session protocol.
+
+- dtn-tcpcl::sdnv: RFC 5050 self-delimiting numeric values with
+  canonical encoding, truncation/overflow errors and tests including
+  u64::MAX roundtrips.
+- dtn-tcpcl::v4: wire-level TCPCLv4 — "dtn!" contact header with
+  version 4, SESS_INIT/SESS_ACK handshake (contact flags, keepalive
+  negotiation as the minimum of both offers, session EID exchange),
+  SESS_REFUSE on version mismatch, KEEPALIVE, MSG_REJECT for unknown
+  message types, XFER_INIT/XFER_SEGMENT/XFER_ACK/XFER_REFUSE
+  acknowledged transfers (single START/END segment per RFC 9174
+  section 3.6 minimum-overhead policy) and SESS_TERM termination with
+  reason codes.
+- dtn-tcpcl::v4::Session: streaming session driver over any
+  Read+Write transport, emitting typed events (Bundle, Acked,
+  Refused, Keepalive, Terminated, Rejected). Tests: full loopback
+  session (handshake, two-way acked transfers, SESS_TERM), keepalive
+  roundtrip, unknown-message-type rejection, bad-version refusal.
+- dtn-daemon: exchange_v4() — TCPCLv4 contact with handshake,
+  acked outbound transfers, inbound bundles through the node engine
+  and clean shutdown; tests for one-way and two-way delivery.
+- Honest scope: TLS (RFC 9174 section 4.4), extension items and
+  multi-segment transfers remain future work.
+
 ## 0.4.0 (2026-11-05)
 
 Phase 6 (security part 2) — bundle confidentiality.
