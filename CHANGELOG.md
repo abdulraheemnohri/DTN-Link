@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.7.0 (2026-11-06)
+
+Phase 8/10 groundwork — modular transport adapters (KISS/LoRa, serial,
+stream abstraction for Bluetooth / Wi-Fi Direct).
+
+- dtn-transport (new crate): FrameCodec framing abstraction over any
+  Read+Write byte link; LengthPrefixCodec (wire-compatible with the
+  dtn-daemon TCPCL-lite contact protocol) and KissCodec (KISS framing
+  as used by LoRa TNCs and serial radio modems).
+- exchange_framed: full contact exchange (EID greeting, routing-driven
+  outbound push, inbound receive loop) over any byte stream — TCP,
+  serial, Bluetooth RFCOMM, Wi-Fi Direct group-owner sockets.
+- KISS framing with FEND/FESC escaping, non-data command-frame
+  skipping, line-noise resync; tests for roundtrips, escape bytes,
+  multi-frame streams and malformed-escape rejection.
+- Interop test proving exchange_framed + LengthPrefixCodec completes a
+  real two-node contact against dtn-daemon::exchange over TCP.
+- In-memory duplex stream pair (mpsc-backed) for adapter testing, with
+  bidirectional transfer tests.
+- Feature-gated serial glue (serialport crate): open real LoRa TNC /
+  radio-modem ports and run a KISS contact exchange over them.
+- Honest scope: Bluetooth RFCOMM / Wi-Fi Direct platform glue (OS
+  socket creation, pairing UI) is the next milestone — the transport
+  layer consumes any such stream once opened.
+
+
 ## 0.6.0 (2026-11-06)
 
 Phase 6 (security part 3) — key distribution / trust store.
@@ -10,7 +36,7 @@ Phase 6 (security part 3) — key distribution / trust store.
 - verify_signed_bundle: verifies a signed bundle against the key
   trusted for its source EID — Valid / Invalid / UnknownSource /
   NoIntegrityBlock / MultipleIntegrityBlocks.
-- cli: new `keyring add|list|remove` commands; `verify` now works
+- cli: new keyring add|list|remove commands; verify now works
   without an explicit pubkey by consulting the keyring.
 - 10 keyring tests including tamper and persistence coverage.
 - Honest scope: automatic key exchange during contacts, signed key
@@ -56,7 +82,7 @@ Phase 6 (security part 2) — bundle confidentiality.
 - 9 BCB tests: roundtrip (incl. wire), wrong key, tampered ciphertext,
   tampered nonce, unencrypted bundle, multi-BCB, malformed, and a
   wire test asserting the plaintext is absent from encoded bytes.
-- cli: new `encrypt <key-hex>` and `decrypt <key-hex>` commands.
+- cli: new encrypt <key-hex> and decrypt <key-hex> commands.
 - Honest scope: key distribution/rotation and RFC 9173 context
   identifiers are future work.
 
@@ -69,7 +95,7 @@ Phase 5 — bundle security (BPSec-aligned integrity).
   Valid / NoIntegrityBlock / Invalid / MultipleIntegrityBlocks
   outcomes; tests for tampered payload, tampered signature, wrong
   key, unsigned bundles and malformed multi-BIB bundles.
-- cli: new `verify <pubkey-hex>` command that checks a bundle from
+- cli: new verify <pubkey-hex> command that checks a bundle from
   stdin against a public key.
 - Honest scope: RFC 9173 contexts (HMAC) and BCB confidentiality
   are the next milestone; this block uses an Ed25519 context.
@@ -81,13 +107,13 @@ Phases 2-4 — multi-hop forwarding, hybrid routing, TCP transport.
 - dtn-routing: epidemic, spray-and-wait (bounded copy budget) and
   opportunistic (encounter history) strategies, explainable decisions,
   unit tests for each strategy.
-- dtn-core: `select_outbound(peer)` store-carry-forward selection;
+- dtn-core: select_outbound(peer) store-carry-forward selection;
   multi-hop A→B→C test, partition/resume test, restart persistence test.
 - dtn-tcpcl: real TCP transport, length-prefixed frames, 16 MiB frame
   limit, loopback transfer tests, oversized-frame rejection test.
 - dtn-daemon: TCP node daemon with peer sync loop and expiry cleanup;
   two-node TCP delivery test and A→B→C multi-hop-over-TCP test.
-- cli: new `forward` (routing dry-run) and `daemon` commands.
+- cli: new forward (routing dry-run) and daemon commands.
 - docs: architecture updated with multi-hop flow and contact protocol.
 
 ## 0.1.0 (2026-11-04)

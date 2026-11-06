@@ -1,0 +1,20 @@
+[package]
+name = "dtn-transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pluggable convergence adapters (KISS/LoRa, serial, stream framing) for DTN-Link"
+
+[dependencies]
+dtn-bpv7.workspace = true
+dtn-core.workspace = true
+
+[dev-dependencies]
+dtn-daemon.workspace = true
+
+[features]
+serial = ["dep:serialport"]
+
+[dependencies.serialport]
+version = "4"
+optional = true
