@@ -1,4 +1,4 @@
-//! dtn-link CLI (Phases 1-6).
+//! dtn-link CLI (Phases 1-6 + keyring).
 
 use dtn_bpv7::{Bundle, Eid};
 use dtn_core::Node;
@@ -117,26 +117,22 @@ fn main() {
             dtn_daemon::run(cfg).expect("daemon failed");
         }
         Some("verify") => {
-            // usage: dtn-link verify <pubkey-32-byte-hex>   (bundle bytes on stdin)
-            let key_hex = match args.get(1) {
-                Some(k) => k.clone(),
-                None => {
-                    eprintln!("usage: dtn-link verify <pubkey-32-byte-hex> < bundle.bin");
-                    std::process::exit(2);
-                }
-            };
-            let key_bytes = hex_to_32(&key_hex).unwrap_or_else(|| {
-                eprintln!("error: pubkey must be 64 hex characters (32 bytes)");
-                std::process::exit(2);
-            });
-            let key = ed25519_dalek::VerifyingKey::from_bytes(&key_bytes).expect("invalid key");
+            // usage: dtn-link verify [pubkey-32-byte-hex]   (bundle bytes on stdin)
+            // Without a pubkey argument, the trusted key for the bundle's
+            // source EID is looked up in the local keyring.
             let mut wire = Vec::new();
             std::io::stdin().read_to_end(&mut wire).expect("stdin");
             let bundle = Bundle::decode(&wire).unwrap_or_else(|e| {
                 eprintln!("invalid bundle: {e}");
                 std::process::exit(1);
             });
-            match dtn_bpsec::verify_bundle(&bundle, &key) {
+            if let Some(key_hex) = args.get(1) {
+                let key_bytes = hex_to_32(key_hex).unwrap_or_else(|| {
+                    eprintln!("error: pubkey must be 64 hex characters (32 bytes)");
+                    std::process::exit(2);
+                });
+                let key = ed25519_dalek::VerifyingKey::from_bytes(&key_bytes).expect("invalid key");
+                match dtn_bpsec::verify_bundle(&bundle, &key) {
                 dtn_bpsec::VerifyOutcome::Valid => {
                     println!("VALID — signature verified");
                 }
@@ -147,9 +143,33 @@ fn main() {
                 dtn_bpsec::VerifyOutcome::NoIntegrityBlock => {
                     println!("UNSIGNED — bundle carries no integrity block");
                 }
-                dtn_bpsec::VerifyOutcome::MultipleIntegrityBlocks => {
-                    println!("MALFORMED — multiple integrity blocks");
-                    std::process::exit(1);
+                    dtn_bpsec::VerifyOutcome::MultipleIntegrityBlocks => {
+                        println!("MALFORMED — multiple integrity blocks");
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                // Keyring lookup by source EID.
+                let mut home = PathBuf::from(
+                    std::env::var("DTN_LINK_HOME").unwrap_or_else(|_| ".dtn-link".into()),
+                );
+                std::fs::create_dir_all(&home).ok();
+                home.push("keys.db");
+                let kr = dtn_keyring::Keyring::open(&home).expect("open keyring");
+                match dtn_keyring::verify_signed_bundle(&bundle, &kr).expect("keyring") {
+                    dtn_keyring::KeyringVerifyOutcome::Valid => println!("VALID — signature verified against trusted key"),
+                    dtn_keyring::KeyringVerifyOutcome::Invalid => {
+                        println!("INVALID — signature does not match the trusted key for this source");
+                        std::process::exit(1);
+                    }
+                    dtn_keyring::KeyringVerifyOutcome::UnknownSource => {
+                        println!("UNKNOWN SOURCE — no trusted key for {} (add one: dtn-link keyring add)", bundle.primary.source_node.as_uri());
+                    }
+                    dtn_keyring::KeyringVerifyOutcome::NoIntegrityBlock => println!("UNSIGNED — bundle carries no integrity block"),
+                    dtn_keyring::KeyringVerifyOutcome::MultipleIntegrityBlocks => {
+                        println!("MALFORMED — multiple integrity blocks");
+                        std::process::exit(1);
+                    }
                 }
             }
         }
@@ -206,6 +226,62 @@ fn main() {
                 }
             }
         }
+        Some("keyring") => {
+            let mut home = PathBuf::from(
+                std::env::var("DTN_LINK_HOME").unwrap_or_else(|_| ".dtn-link".into()),
+            );
+            std::fs::create_dir_all(&home).ok();
+            home.push("keys.db");
+            let sub = args.get(1).map(String::as_str);
+            match sub {
+                Some("add") => {
+                    let (eid, key_hex) = match (args.get(2), args.get(3)) {
+                        (Some(e), Some(k)) => (e.clone(), k.clone()),
+                        _ => {
+                            eprintln!("usage: dtn-link keyring add <eid-uri> <pubkey-64-hex-chars>");
+                            std::process::exit(2);
+                        }
+                    };
+                    let key_bytes = hex_to_32(&key_hex).unwrap_or_else(|| {
+                        eprintln!("error: pubkey must be 64 hex characters (32 bytes)");
+                        std::process::exit(2);
+                    });
+                    let key = ed25519_dalek::VerifyingKey::from_bytes(&key_bytes).expect("invalid key");
+                    let mut kr = dtn_keyring::Keyring::open(&home).expect("open keyring");
+                    let inserted = kr.put(&eid, &key).expect("put key");
+                    println!("{}", if inserted { format!("Added trusted key for {eid}") } else { format!("Replaced trusted key for {eid}") });
+                }
+                Some("list") => {
+                    let kr = dtn_keyring::Keyring::open(&home).expect("open keyring");
+                    if kr.count().unwrap_or(0) == 0 {
+                        println!("Keyring is empty.");
+                    }
+                    for t in kr.list().expect("list") {
+                        println!("{}  {}", t.eid, t.pubkey_hex);
+                    }
+                }
+                Some("remove") => {
+                    let eid = match args.get(2) {
+                        Some(e) => e.clone(),
+                        None => {
+                            eprintln!("usage: dtn-link keyring remove <eid-uri>");
+                            std::process::exit(2);
+                        }
+                    };
+                    let mut kr = dtn_keyring::Keyring::open(&home).expect("open keyring");
+                    if kr.remove(&eid).expect("remove") {
+                        println!("Removed trusted key for {eid}");
+                    } else {
+                        eprintln!("No trusted key for {eid}");
+                        std::process::exit(1);
+                    }
+                }
+                _ => {
+                    eprintln!("usage: dtn-link keyring add|list|remove ...");
+                    std::process::exit(2);
+                }
+            }
+        }
         Some("decode") => {
             let mut wire = Vec::new();
             std::io::stdin().read_to_end(&mut wire).expect("stdin");
@@ -217,7 +293,7 @@ fn main() {
                 }
             }
         }
-        Some("version") => println!("dtn-link 0.4.0 (BPv7, phases 1-6: integrity + confidentiality)"),
+        Some("version") => println!("dtn-link 0.5.0 (BPv7, phases 1-6: security stack complete)"),
         _ => {
             eprintln!(
                 "dtn-link — decentralized DTN communication (phases 1-6)

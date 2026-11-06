@@ -1,0 +1,13 @@
+[package]
+name = "dtn-keyring"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Trusted Ed25519 public keys per EID (key distribution) for DTN-Link"
+
+[dependencies]
+dtn-bpv7.workspace = true
+dtn-identity.workspace = true
+dtn-bpsec.workspace = true
+ed25519-dalek.workspace = true
+rusqlite.workspace = true

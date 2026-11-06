@@ -9,7 +9,7 @@ without requiring a SIM card, cellular subscription or Wi-Fi router for every
 communication. It uses Bundle Protocol v7 (RFC 9171), store-carry-forward
 routing, modular physical transport adapters and optional internet gateways.
 
-## Status: Phases 1-6 (Rust core + TCP transport + BPSec integrity & confidentiality)
+## Status: Phases 1-6 (Rust core + TCP transport + BPSec security stack + keyring)
 
 | Component | Status |
 |---|---|
@@ -21,9 +21,10 @@ routing, modular physical transport adapters and optional internet gateways.
 | TCP transport + daemon (TCPCL-lite) | implemented + tested (crates/dtn-tcpcl, dtn-daemon) |
 | BPSec bundle integrity (RFC 9172-aligned BIB, Ed25519) | implemented + tested (crates/dtn-bpsec) |
 | BPSec payload confidentiality (BCB, AES-256-GCM) | implemented + tested (crates/dtn-bpsec::bcb) |
-| CLI | implemented — init/status/send/receive/bundles/forward/daemon/verify/encrypt/decrypt/decode |
+| Keyring: trusted public keys per EID (TOFU key distribution) | implemented + tested (crates/dtn-keyring) |
+| CLI | implemented — init/status/send/receive/bundles/forward/daemon/verify/keyring/encrypt/decrypt/decode |
 | Full RFC 9174 TCPCLv4 session protocol | next milestone |
-| RFC 9173 context identifiers + key distribution | next milestone |
+| RFC 9173 context identifiers; automatic key exchange | future |
 | Bluetooth / Wi-Fi Direct transports | next phase |
 | Android / iOS / Windows / Linux apps | Phases 7-9 |
 | LoRa / radio / serial adapters | Phase 10 |

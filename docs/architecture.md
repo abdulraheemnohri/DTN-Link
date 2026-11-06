@@ -22,6 +22,7 @@
 | dtn-daemon: TCP listener + peer sync loop (contacts)   |
 +--------------------------------------------------------+
 | dtn-bpsec: BIB (type 11) Ed25519 sig + BCB (type 12)   |
+| dtn-keyring: trusted keys per EID (TOFU trust store)    |
 +--------------------------------------------------------+
 | dtn-core: Node                                          |
 |   send()        -> Bundle -> store                      |
@@ -53,6 +54,13 @@
   belongs to which node) are planned next.
 - A DTN endpoint identifier is NOT proof of identity; only signature
   verification against a known key is.
+- **Key distribution**: `dtn_keyring` is the local trust store
+  (EID → trusted Ed25519 public key, SQLite). The operator adds keys
+  with `dtn-link keyring add` (trust-on-first-use);
+  `dtn_keyring::verify_signed_bundle` checks a bundle's BIB against
+  the trusted key for its source EID. Honest scope: automatic key
+  exchange during the contact protocol, signed key rotation and
+  web-of-trust are future work.
 
 ### Multi-hop flow
 
@@ -88,7 +96,7 @@ keepalives or XFER acknowledgements); it is a real, working TCP transport.
 
 ## Roadmap
 
-- Phase 5 (done): BPSec integrity. Phase 6-security (done): BCB confidentiality. Next: RFC 9173 contexts + key distribution.
+- Phases 5-6 security (done): BIB integrity, BCB confidentiality, keyring trust store. Next: RFC 9173 contexts, automatic key exchange.
 - Phase 6: BLE + Wi-Fi Direct adapters, discovery.
 - Phases 7-9: platform apps.
 - Phase 10: serial/LoRa adapters.

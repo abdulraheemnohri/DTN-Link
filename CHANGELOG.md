@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.5.0 (2026-11-06)
+
+Phase 6 (security part 3) — key distribution / trust store.
+
+- dtn-keyring: SQLite-backed trust store mapping EID URIs to trusted
+  Ed25519 public keys (trust-on-first-use, operator managed). put /
+  get / remove / list / count, with disk-persistence test.
+- verify_signed_bundle: verifies a signed bundle against the key
+  trusted for its source EID — Valid / Invalid / UnknownSource /
+  NoIntegrityBlock / MultipleIntegrityBlocks.
+- cli: new `keyring add|list|remove` commands; `verify` now works
+  without an explicit pubkey by consulting the keyring.
+- 10 keyring tests including tamper and persistence coverage.
+- Honest scope: automatic key exchange during contacts, signed key
+  rotation and web-of-trust are future work.
+
 ## 0.5.0 (2026-11-05)
 
 Phase 7 — full RFC 9174 TCPCLv4 session protocol.
