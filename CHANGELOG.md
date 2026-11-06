@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.5.0 (2026-11-06)
+## 0.6.0 (2026-11-06)
+
+Phase 6 (security part 3) — key distribution / trust store.
 
 Phase 6 (security part 3) — key distribution / trust store.
 
@@ -15,6 +17,7 @@ Phase 6 (security part 3) — key distribution / trust store.
 - 10 keyring tests including tamper and persistence coverage.
 - Honest scope: automatic key exchange during contacts, signed key
   rotation and web-of-trust are future work.
+
 
 ## 0.5.0 (2026-11-05)
 

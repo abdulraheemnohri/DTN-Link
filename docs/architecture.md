@@ -12,7 +12,7 @@
 8. Gateway layer — internet/satellite gateways [planned]
 9. Management layer — monitoring, diagnostics, configuration [planned]
 
-## Current implementation (Phases 1-6)
+## Current implementation (Phases 1-7)
 
 ```
 +--------------------------------------------------------+
@@ -31,7 +31,7 @@
 +----------+---------------+---------------+-------------+
 | dtn-routing | dtn-identity | dtn-storage (SQLite)      |
 +----------+---------------+---------------+-------------+
-| dtn-tcpcl: length-prefixed frames over TCP              |
+| dtn-tcpcl: length-prefixed frames + TCPCLv4 (RFC 9174) |
 +--------------------------------------------------------+
 | dtn-bpv7: CBOR, PrimaryBlock, CanonicalBlock, Eid      |
 +--------------------------------------------------------+
@@ -82,17 +82,23 @@
 
 Every decision carries an explainable reason string.
 
-### Contact protocol (TCPCL-lite frames)
+### Contact protocol
 
-Frame = `[u32 BE length][bytes]`, zero-length = end-of-batch.
+Two transports exist:
 
-1. Hello: each side sends its EID URI as one text frame.
-2. Each side sends selected outbound bundles (one frame each), then
-   end-of-batch.
-3. Each side reads frames until end-of-batch, dedups and stores.
+- **TCPCL-lite**: `[u32 BE length][bytes]` frames, zero = end-of-batch,
+  hello-then-batches exchange (dtn-daemon `exchange()`).
+- **TCPCLv4 (RFC 9174)**: full wire-level session protocol
+  (dtn-tcpcl::v4) — `dtn!` contact header, SESS_INIT/SESS_ACK
+  handshake with session EIDs and keepalive negotiation, KEEPALIVE,
+  XFER_INIT/XFER_SEGMENT/XFER_ACK/XFER_REFUSE acknowledged transfers
+  (single START/END segment policy), SESS_REFUSE on version mismatch,
+  MSG_REJECT for unknown types, SESS_TERM with reason codes.
+  Streaming `Session` driver over any Read+Write transport with typed
+  events. dtn-daemon `exchange_v4()` uses it for contacts.
 
-Honest limitation: this is not yet full RFC 9174 (no session flags,
-keepalives or XFER acknowledgements); it is a real, working TCP transport.
+Honest limitation: TLS (RFC 9174 §4.4), extension items and
+multi-segment transfers remain future work.
 
 ## Roadmap
 
