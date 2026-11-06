@@ -4,8 +4,6 @@
 
 Phase 6 (security part 3) — key distribution / trust store.
 
-Phase 6 (security part 3) — key distribution / trust store.
-
 - dtn-keyring: SQLite-backed trust store mapping EID URIs to trusted
   Ed25519 public keys (trust-on-first-use, operator managed). put /
   get / remove / list / count, with disk-persistence test.
