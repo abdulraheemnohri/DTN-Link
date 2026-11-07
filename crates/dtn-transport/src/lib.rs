@@ -16,6 +16,9 @@
 //! * duplex — an in-memory byte-stream pair for testing adapters.
 //! * serial (cargo feature "serial") — real serial-port glue via
 //!   the serialport crate for LoRa TNC / radio-modem hardware.
+//! * wifi_direct — Wi-Fi Direct group glue: the group owner listens
+//!   on TCP (GroupOwner) and members connect (contact_owner and a
+//!   retrying variant for groups that are still forming).
 //!
 //! The same node engine (dtn_core::Node) is shared by all adapters, so a
 //! bundle accepted on any transport is stored, routed and re-forwarded
@@ -25,6 +28,7 @@ pub mod duplex;
 pub mod kiss;
 #[cfg(feature = "serial")]
 pub mod serial;
+pub mod wifi_direct;
 
 use dtn_bpv7::Eid;
 use dtn_core::Node;

@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.9.0 (2026-11-07)
+
+Phase 9 (adapters) — Wi-Fi Direct platform glue.
+
+- dtn-transport::wifi_direct: a Wi-Fi Direct group is a normal IP
+  network once the platform negotiates it (wpa_supplicant p2p_* /
+  Android WifiP2pManager), so the convergence layer is plain TCP —
+  GroupOwner binds the group-owner listener and serves one full
+  TCPCL-lite-compatible contact per member (serve_contact / serve),
+  contact_owner connects a member to the group owner, and
+  contact_owner_with_retry keeps dialing while the group is still
+  forming. A retried contact cannot duplicate bundles (the node
+  engine dedups on source EID + creation timestamp).
+- New tests over real loopback TCP: two-way bundle delivery between
+  group owner and member, member retry succeeding after the owner
+  binds late, one owner serving members sequentially, and immediate
+  reporting of protocol-level errors (no retry masking).
+- docs: adapters.md gains a Wi-Fi Direct section; architecture.md
+  marks convergence layer Wi-Fi Direct part done.
+- Honest scope: group formation / WPS negotiation belongs to the OS;
+  Bluetooth RFCOMM glue is the next adapter milestone — an
+  OS-provided RFCOMM serial port already works today through the
+  serial feature.
+
 ## 0.8.0 (2026-11-07)
 
 Phase 8 — security integrated into the data path.

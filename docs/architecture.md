@@ -8,11 +8,11 @@
 4. Security layer — BPSec (RFC 9172) [BIB integrity implemented]
 5. Routing layer — epidemic, spray-and-wait, opportunistic [implemented]
 6. Storage layer — persistent SQLite queue with dedup + expiry [implemented]
-7. Convergence layer — transports [TCPCL-lite implemented; BLE/Wi-Fi Direct planned]
+7. Convergence layer — transports [TCPCL-lite + Wi-Fi Direct owner/member implemented; BLE planned]
 8. Gateway layer — internet/satellite gateways [planned]
 9. Management layer — monitoring, diagnostics, configuration [planned]
 
-## Current implementation (Phases 1-8)
+## Current implementation (Phases 1-9)
 
 ```
 +--------------------------------------------------------+
@@ -20,7 +20,8 @@
 |     verify/decode                                        |
 +--------------------------------------------------------+
 | dtn-daemon: contacts with sign/verify + TOFU key learn |
-| dtn-transport: framing codecs (length-prefix, KISS) + streams |
+| dtn-transport: framing codecs (length-prefix, KISS) +   |
+|   streams + Wi-Fi Direct group owner/member glue        |
 +--------------------------------------------------------+
 | dtn-bpsec: BIB (type 11) Ed25519 sig + BCB (type 12)   |
 | dtn-keyring: trusted keys per EID (TOFU trust store)    |
@@ -128,14 +129,22 @@ multi-segment transfers remain future work.
   Bluetooth RFCOMM, Wi-Fi Direct group-owner sockets.
 - Feature-gated serial glue (`serialport`, cargo feature "serial") opens
   real LoRa TNC / radio-modem ports.
-- Honest scope: Bluetooth RFCOMM / Wi-Fi Direct OS socket creation and
-  pairing UI are the next milestone; the transport layer already
-  consumes any such stream once opened.
+- **Wi-Fi Direct (Phase 9)**: a Wi-Fi Direct group is a normal IP
+  network once the platform negotiates it, so the convergence layer is
+  plain TCP. `wifi_direct::GroupOwner` binds the group-owner listener
+  (`serve_contact` / `serve` run one full contact per member),
+  `contact_owner` connects a member, and `contact_owner_with_retry`
+  keeps dialing while the group is still forming. Group formation
+  (WPS pairing, owner election) stays in the OS; tests exercise both
+  sides over real loopback TCP.
+- Honest scope: Bluetooth RFCOMM OS socket glue is the next milestone;
+  an OS-provided RFCOMM serial port already works through the serial
+  feature, and the stream layer consumes any such socket once opened.
 
 ## Roadmap
 
 - Phases 5-6, 8 security (done): BIB integrity, BCB confidentiality, keyring trust store, secured contacts with TOFU key learning. Next: key rotation, MITM enforcement, RFC 9173 contexts, TLS (RFC 9174 §4.4).
-- Next: Bluetooth RFCOMM / Wi-Fi Direct platform glue (stream layer ready).
+- Done: Wi-Fi Direct platform glue — GroupOwner listener + member contacts with retry (dtn-transport::wifi_direct). Next: Bluetooth RFCOMM glue (an OS-provided RFCOMM serial port already works through the serial feature).
 - Phases 7-9: platform apps.
 - Done: serial/LoRa adapters (feature-gated serial + KISS framing).
 - Phase 11: gateways. Phase 12: interop + performance testing.

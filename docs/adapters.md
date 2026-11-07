@@ -39,13 +39,49 @@ exchange_framed<S: Read + Write> accepts any stream:
 
 * **TCP** — the daemon already does this; an interop test proves the
   generic exchange completes a contact against dtn_daemon::exchange.
-* **Wi-Fi Direct** — a Wi-Fi Direct group is a normal IP network; the
-  group owner listens on TCP and members connect, so the existing TCP
-  transport covers Wi-Fi Direct once the platform forms the group.
+* **Wi-Fi Direct** — `dtn_transport::wifi_direct` (below): the group
+  owner listens on TCP and members connect, with a retrying member
+  helper for groups that are still forming.
 * **Bluetooth** — once the OS pairing provides an RFCOMM/L2CAP socket
   (byte stream), exchange_framed runs over it unchanged. Platform
   glue for socket creation is the next milestone.
 * **Serial / LoRa** — see below.
+
+## Wi-Fi Direct (wifi_direct)
+
+A Wi-Fi Direct group, once the platform negotiates it (wpa_supplicant
+`p2p_*` on Linux, WifiP2pManager on Android), is an ordinary IP
+network: the group owner is the access point and members are its
+clients. So the convergence layer is plain TCP:
+
+```rust
+use std::sync::{Arc, Mutex};
+use dtn_core::{Node, Strategy};
+
+let node = Arc::new(Mutex::new(
+    Node::open(1, &".dtn-link/dtn.db".into(), Strategy::Epidemic).unwrap()));
+
+// Group owner — serve member contacts, one connection at a time:
+let owner = dtn_transport::wifi_direct::GroupOwner::bind(4556)?;
+let peers = owner.serve(&node, 8)?; // up to 8 member contacts
+
+// Member — contact the group owner (its address on the p2p
+// interface), retrying while the group is still forming:
+let peer = dtn_transport::wifi_direct::contact_owner_with_retry(
+    &node, "192.168.49.1:4556".parse()?, 20,
+    std::time::Duration::from_millis(500))?;
+```
+
+`serve_contact` runs one full contact per accepted connection and
+`contact_owner_with_retry` keeps dialing (groups take seconds to
+form). A retried contact cannot duplicate bundles — the node engine
+dedups on (source EID, creation timestamp). Group formation itself
+(WPS pairing, owner election) belongs to the OS.
+
+Tests exercise the group owner and member sides over real loopback
+TCP: two-way bundle delivery, a member retrying until a late owner
+binds, sequential service of multiple members by one owner, and
+immediate reporting of protocol-level errors.
 
 ## Serial and LoRa (feature "serial")
 
@@ -76,11 +112,14 @@ test suite covers:
 * KISS roundtrips including FEND/FESC escaping, multi-frame streams,
   line-noise resync, command-frame skipping, invalid escape rejection,
 * two-way bundle exchanges over in-memory links (both codecs),
-* TCP interop between the generic exchange and dtn-daemon.
+* TCP interop between the generic exchange and dtn-daemon,
+* Wi-Fi Direct group-owner/member contacts over real loopback TCP
+  (delivery, late-owner retry, sequential members, error reporting).
 
 ## Honest scope
 
-RFCOMM/Bluetooth and Wi-Fi Direct *platform* glue (OS socket creation,
-pairing UI, group negotiation) is not in this crate yet; the transport
-layer is ready for it. Internet/satellite gateways and federation come
-in later phases.
+Bluetooth RFCOMM platform glue (OS socket creation, pairing UI) is not
+in this crate yet; the transport layer is ready for it — and an
+OS-provided RFCOMM serial port already works today through the serial
+feature. Internet/satellite gateways and federation come in later
+phases.
