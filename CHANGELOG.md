@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.7.0 (2026-11-07)
+## 0.8.0 (2026-11-07)
 
 Phase 8 — security integrated into the data path.
 

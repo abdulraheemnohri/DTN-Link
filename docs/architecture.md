@@ -20,6 +20,7 @@
 |     verify/decode                                        |
 +--------------------------------------------------------+
 | dtn-daemon: contacts with sign/verify + TOFU key learn |
+| dtn-transport: framing codecs (length-prefix, KISS) + streams |
 +--------------------------------------------------------+
 | dtn-bpsec: BIB (type 11) Ed25519 sig + BCB (type 12)   |
 | dtn-keyring: trusted keys per EID (TOFU trust store)    |
@@ -117,10 +118,24 @@ Two transports exist:
 Honest limitation: TLS (RFC 9174 §4.4), extension items and
 multi-segment transfers remain future work.
 
+### Generic transport adapters (dtn-transport)
+
+- `FrameCodec` framing abstraction over any Read+Write byte link:
+  `LengthPrefixCodec` (wire-compatible with TCPCL-lite contacts) and
+  `KissCodec` (KISS framing as used by LoRa TNCs / serial radio modems).
+- `exchange_framed`: full contact exchange (EID greeting, routing-driven
+  outbound push, inbound receive) over any byte stream — TCP, serial,
+  Bluetooth RFCOMM, Wi-Fi Direct group-owner sockets.
+- Feature-gated serial glue (`serialport`, cargo feature "serial") opens
+  real LoRa TNC / radio-modem ports.
+- Honest scope: Bluetooth RFCOMM / Wi-Fi Direct OS socket creation and
+  pairing UI are the next milestone; the transport layer already
+  consumes any such stream once opened.
+
 ## Roadmap
 
 - Phases 5-6, 8 security (done): BIB integrity, BCB confidentiality, keyring trust store, secured contacts with TOFU key learning. Next: key rotation, MITM enforcement, RFC 9173 contexts, TLS (RFC 9174 §4.4).
-- Phase 6: BLE + Wi-Fi Direct adapters, discovery.
+- Next: Bluetooth RFCOMM / Wi-Fi Direct platform glue (stream layer ready).
 - Phases 7-9: platform apps.
-- Phase 10: serial/LoRa adapters.
+- Done: serial/LoRa adapters (feature-gated serial + KISS framing).
 - Phase 11: gateways. Phase 12: interop + performance testing.

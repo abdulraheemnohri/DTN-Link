@@ -307,7 +307,7 @@ fn main() {
                 }
             }
         }
-        Some("version") => println!("dtn-link 0.7.0 (BPv7, phases 1-8: secured contacts)"),
+        Some("version") => println!("dtn-link 0.8.0 (BPv7, secured contacts, transport adapters)"),
         _ => {
             eprintln!(
                 "dtn-link — decentralized DTN communication (phases 1-6)
