@@ -12,14 +12,14 @@
 8. Gateway layer — internet/satellite gateways [planned]
 9. Management layer — monitoring, diagnostics, configuration [planned]
 
-## Current implementation (Phases 1-7)
+## Current implementation (Phases 1-8)
 
 ```
 +--------------------------------------------------------+
 | cli: init/status/send/receive/bundles/forward/daemon/   |
 |     verify/decode                                        |
 +--------------------------------------------------------+
-| dtn-daemon: TCP listener + peer sync loop (contacts)   |
+| dtn-daemon: contacts with sign/verify + TOFU key learn |
 +--------------------------------------------------------+
 | dtn-bpsec: BIB (type 11) Ed25519 sig + BCB (type 12)   |
 | dtn-keyring: trusted keys per EID (TOFU trust store)    |
@@ -82,6 +82,23 @@
 
 Every decision carries an explainable reason string.
 
+### Secured contacts (Phase 8)
+
+When a keyring is configured, a TCPCL-lite contact becomes:
+
+1. Hello: EID frame + 32-byte Ed25519 public key frame (both sides).
+2. TOFU: each side stores the peer's key in its keyring on first
+   contact; a changed key logs a warning (no enforcement yet — MITM
+   hardening is future work).
+3. Outbound bundles are signed (BIB) with the node identity; the
+   identity seed persists across restarts (`Node::open_persistent`).
+4. Inbound: signed bundles are verified against the trusted key for
+   the source EID — Invalid / malformed are dropped; unsigned and
+   unknown-source signed bundles are accepted with a log line.
+
+TCPCLv4 contacts sign/verify too, but the RFC 9174 session EID carries
+no key — hello key learning is TCPCL-lite only (honest limitation).
+
 ### Contact protocol
 
 Two transports exist:
@@ -102,7 +119,7 @@ multi-segment transfers remain future work.
 
 ## Roadmap
 
-- Phases 5-6 security (done): BIB integrity, BCB confidentiality, keyring trust store. Next: RFC 9173 contexts, automatic key exchange.
+- Phases 5-6, 8 security (done): BIB integrity, BCB confidentiality, keyring trust store, secured contacts with TOFU key learning. Next: key rotation, MITM enforcement, RFC 9173 contexts, TLS (RFC 9174 §4.4).
 - Phase 6: BLE + Wi-Fi Direct adapters, discovery.
 - Phases 7-9: platform apps.
 - Phase 10: serial/LoRa adapters.

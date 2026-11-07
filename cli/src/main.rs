@@ -1,4 +1,4 @@
-//! dtn-link CLI (Phases 1-6 + keyring).
+//! dtn-link CLI (Phases 1-8: secured contacts).
 
 use dtn_bpv7::{Bundle, Eid};
 use dtn_core::Node;
@@ -29,8 +29,10 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("init") => {
             let node_number: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
-            let node = Node::open(node_number, &db_path(), Strategy::Epidemic).expect("failed to init node");
+            let node = Node::open_persistent(node_number, &db_path(), Strategy::Epidemic).expect("failed to init node");
             println!("Initialized node {}", node.eid());
+            println!("Public key: {}", to_hex(node.identity.public_key().as_bytes()));
+            println!("Share this key with peers so they can verify your bundles (dtn-link keyring add).");
         }
         Some("status") => {
             let node = Node::open(1, &db_path(), Strategy::Epidemic).expect("failed to open node");
@@ -107,12 +109,24 @@ fn main() {
                 .and_then(|i| args.get(i + 1)).map(String::as_str);
             let interval: u64 = args.iter().position(|a| a == "--interval")
                 .and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(30);
+            let insecure = args.iter().any(|a| a == "--insecure");
+            let keyring = if insecure {
+                None
+            } else {
+                let mut home = PathBuf::from(
+                    std::env::var("DTN_LINK_HOME").unwrap_or_else(|_| ".dtn-link".into()),
+                );
+                std::fs::create_dir_all(&home).ok();
+                home.push("keys.db");
+                Some(home)
+            };
             let cfg = dtn_daemon::DaemonConfig {
                 listen,
                 peers,
                 strategy: strategy_from(strategy),
                 sync_interval: Duration::from_secs(interval),
                 db: db_path(),
+                keyring,
             };
             dtn_daemon::run(cfg).expect("daemon failed");
         }
@@ -293,7 +307,7 @@ fn main() {
                 }
             }
         }
-        Some("version") => println!("dtn-link 0.5.0 (BPv7, phases 1-6: security stack complete)"),
+        Some("version") => println!("dtn-link 0.7.0 (BPv7, phases 1-8: secured contacts)"),
         _ => {
             eprintln!(
                 "dtn-link — decentralized DTN communication (phases 1-6)
@@ -304,7 +318,7 @@ usage:
   dtn-link receive        (bundle bytes on stdin)
   dtn-link bundles
   dtn-link forward <dtn://peer> [strategy]
-  dtn-link daemon --listen 0.0.0.0:4556 [--peers host:port,...] [--strategy epidemic|spray|opportunistic] [--interval 30]
+  dtn-link daemon --listen 0.0.0.0:4556 [--peers host:port,...] [--strategy epidemic|spray|opportunistic] [--interval 30] [--insecure]
   dtn-link verify <pubkey-hex>   (bundle bytes on stdin)
   dtn-link decode         (bundle bytes on stdin, prints structure)
   dtn-link version"
@@ -314,6 +328,10 @@ usage:
     }
 }
 
+
+fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
 fn hex_to_32(s: &str) -> Option<[u8; 32]> {
     let s = s.trim();
     if s.len() != 64 || !s.chars().all(|c| c.is_ascii_hexdigit()) { return None; }

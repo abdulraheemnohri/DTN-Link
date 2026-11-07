@@ -22,12 +22,14 @@ routing, modular physical transport adapters and optional internet gateways.
 | BPSec bundle integrity (RFC 9172-aligned BIB, Ed25519) | implemented + tested (crates/dtn-bpsec) |
 | BPSec payload confidentiality (BCB, AES-256-GCM) | implemented + tested (crates/dtn-bpsec::bcb) |
 | Keyring: trusted public keys per EID (TOFU key distribution) | implemented + tested (crates/dtn-keyring) |
+| Secured contacts: hello key exchange, signed outbound, verified inbound (daemon) | implemented + tested (crates/dtn-daemon) |
+| Persistent node identity across restarts | implemented + tested (crates/dtn-core) |
 | Full RFC 9174 TCPCLv4 session protocol (handshake, keepalive, acked XFER) | implemented + tested (crates/dtn-tcpcl::v4) |
 | Modular transport adapters: framing codecs + generic stream exchange | implemented + tested (crates/dtn-transport) |
 | KISS framing for LoRa TNCs / serial radio modems | implemented + tested (crates/dtn-transport::kiss) |
 | Serial-port hardware glue (cargo feature "serial") | implemented, feature-gated |
 | CLI | implemented — init/status/send/receive/bundles/forward/daemon/verify/keyring/encrypt/decrypt/decode |
-| RFC 9173 context identifiers; automatic key exchange | future |
+| RFC 9173 context identifiers; signed key rotation | future |
 | Bluetooth RFCOMM / Wi-Fi Direct platform glue (stream layer ready) | next phase |
 | Android / iOS / Windows / Linux apps | Phases 7-9 |
 | Internet & satellite gateways | Phase 11 |

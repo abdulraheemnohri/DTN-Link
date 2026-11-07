@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.7.0 (2026-11-07)
+
+Phase 8 — security integrated into the data path.
+
+- dtn-core: `Node::open_persistent` persists the identity seed in a
+  sidecar file (0600 on Unix) so a node keeps the same Ed25519 key
+  pair across restarts; restart-identity test added.
+- dtn-daemon: optional `SecurityCtx` (keyring + identity). When
+  enabled: TCPCL-lite hello now carries the node's Ed25519 public key
+  (second frame) and peers TOFU-learn it into their keyring; outbound
+  bundles are signed (BIB); incoming signed bundles are verified
+  against the trusted key for the source EID and Invalid/Multiple-BIB
+  bundles are DROPPED; unsigned and unknown-source signed bundles are
+  accepted with a log line.
+- New tests: secured contact learns both keys over TCP and delivers a
+  BIB-valid bundle; tampered signed bundle rejected by
+  secured_receive; unsigned still accepted.
+- cli: `init` now uses the persistent identity and prints the node's
+  public key; `daemon` wires the keyring automatically
+  (`--insecure` disables).
+- Honest scope: hello-key mismatch currently warns without enforcing
+  (MITM hardening), key rotation and TLS remain future work; TCPCLv4
+  sessions sign/verify but do not carry hello keys.
+
 ## 0.7.0 (2026-11-06)
 
 Phase 8/10 groundwork — modular transport adapters (KISS/LoRa, serial,

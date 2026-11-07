@@ -54,6 +54,40 @@ impl Node {
         })
     }
 
+    /// Opens the node, persisting the identity seed in a sidecar file
+    /// `<db>.identity` (0600 on Unix) so the node keeps the same key pair
+    /// across restarts. Generates and persists a new seed on first open.
+    pub fn open_persistent(node_number: u64, db_path: &Path, strategy: Strategy) -> Result<Self, NodeError> {
+        let mut os = db_path.as_os_str().to_os_string();
+        os.push(".identity");
+        let seed_path = std::path::PathBuf::from(os);
+        let identity = if seed_path.exists() {
+            let seed = std::fs::read(&seed_path)
+                .map_err(|e| NodeError::Protocol(format!("read identity file: {e}")))?;
+            let Ok(seed) = <[u8; 32]>::try_from(seed.as_slice()) else {
+                return Err(NodeError::Protocol("identity file corrupt".into()));
+            };
+            NodeIdentity::from_seed(node_number, seed)
+        } else {
+            let id = NodeIdentity::generate(node_number);
+            std::fs::write(&seed_path, id.seed_bytes())
+                .map_err(|e| NodeError::Protocol(format!("write identity file: {e}")))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(
+                    &seed_path, std::fs::Permissions::from_mode(0o600));
+            }
+            id
+        };
+        Ok(Node {
+            identity,
+            store: BundleStore::open(db_path)?,
+            routing: RoutingEngine::new(strategy),
+            seq: 0,
+        })
+    }
+
     pub fn eid(&self) -> Eid { self.identity.eid.clone() }
 
     pub fn send(&mut self, destination: Eid, payload: Vec<u8>, lifetime: u64) -> Result<Bundle, NodeError> {
@@ -114,6 +148,24 @@ mod tests {
         let mut p = std::env::temp_dir();
         p.push(format!("dtn-test-{name}-{}.db", std::process::id()));
         p
+    }
+
+    #[test]
+    fn persistent_identity_survives_restart() {
+        let db = tmp("persid");
+        let key1 = {
+            let a = Node::open_persistent(5, &db, Strategy::Epidemic).unwrap();
+            a.identity.public_key()
+        };
+        let key2 = Node::open_persistent(5, &db, Strategy::Epidemic).unwrap().identity.public_key();
+        assert_eq!(key1, key2, "identity seed must persist across restarts");
+        assert_ne!(
+            Node::open_persistent(6, &db, Strategy::Epidemic).unwrap().identity.public_key(),
+            key1,
+            "different node numbers with same db path get different stored seeds is fine, key uniqueness checked"
+        );
+        let _ = std::fs::remove_file(&db);
+        let _ = std::fs::remove_file(format!("{}.identity", db.display()));
     }
 
     #[test]

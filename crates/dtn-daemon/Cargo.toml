@@ -11,4 +11,6 @@ dtn-core.workspace = true
 dtn-routing.workspace = true
 dtn-tcpcl.workspace = true
 dtn-storage.workspace = true
+dtn-bpsec.workspace = true
+dtn-keyring.workspace = true
 rusqlite.workspace = true
