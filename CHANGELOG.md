@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.10.0 (2026-11-08)
+
+Phase 11 — internet + satellite gateways.
+
+- dtn-gateway (new crate): the gateway layer decides WHEN to
+  contact a peer, then performs a real TCPCL-lite contact
+  (dtn-daemon exchange with the optional SecurityCtx) — same wire
+  protocol as every other DTN-Link component, no faked transports.
+- ContactPlan: text-format contact plans (addr, optional
+  unix-seconds window, # comments) with parse/to_text round-trip
+  and explicit, tested window math (inclusive start, exclusive
+  end, opens_in).
+- internet::InternetGateway: contact every always-on peer per
+  sweep; per-peer failures isolated and reported (a dead relay
+  never blocks the rest); SweepReport/ContactReport with peer EID
+  + inbound count; blocking run loop.
+- satellite::SatelliteGateway: pass-window scheduling —
+  run_pass(now) contacts only peers whose windows are open and
+  reports seconds to the next pass; blocking wall-clock run
+  driver sleeps between passes.
+- 13 new tests, all live over real loopback TCP: plan parsing
+  round-trip + validation errors, window bounds math, sweep
+  delivery with inbound counting, dead-peer failure isolation,
+  closed-window no-contact with next-pass reporting, open-pass
+  queue draining, expired-window semantics, earliest-next-pass
+  selection.
+- docs: new docs/gateways.md; architecture.md marks the gateway
+  layer implemented and updates the roadmap; adapters.md points to
+  the gateway crate; workspace bumped to 0.10.0.
+- Honest scope: static plan files (no TLE-driven pass prediction
+  yet); gateway-only routing policies are future work.
+
 ## 0.9.0 (2026-11-07)
 
 Phase 9 (adapters) — Wi-Fi Direct platform glue.

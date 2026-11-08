@@ -121,5 +121,5 @@ test suite covers:
 Bluetooth RFCOMM platform glue (OS socket creation, pairing UI) is not
 in this crate yet; the transport layer is ready for it — and an
 OS-provided RFCOMM serial port already works today through the serial
-feature. Internet/satellite gateways and federation come in later
+feature. Internet/satellite gateways are implemented in the dtn-gateway crate (docs/gateways.md); federation comes in a later
 phases.

@@ -11,11 +11,12 @@ members = [
     "crates/dtn-bpsec",
     "crates/dtn-keyring",
     "crates/dtn-transport",
+    "crates/dtn-gateway",
     "cli",
 ]
 
 [workspace.package]
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/abdulraheemnohri/DTN-Link"
@@ -31,6 +32,7 @@ dtn-daemon = { path = "crates/dtn-daemon" }
 dtn-bpsec = { path = "crates/dtn-bpsec" }
 dtn-keyring = { path = "crates/dtn-keyring" }
 dtn-transport = { path = "crates/dtn-transport" }
+dtn-gateway = { path = "crates/dtn-gateway" }
 ed25519-dalek = "2"
 aes-gcm = "0.10"
 rand = "0.8"

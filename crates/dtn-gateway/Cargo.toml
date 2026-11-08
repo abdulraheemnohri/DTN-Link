@@ -1,0 +1,14 @@
+[package]
+name = "dtn-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Internet and satellite gateways (contact plans, pass windows) for DTN-Link"
+
+[dependencies]
+dtn-bpv7.workspace = true
+dtn-core.workspace = true
+dtn-daemon.workspace = true
+
+[dev-dependencies]
+dtn-routing.workspace = true

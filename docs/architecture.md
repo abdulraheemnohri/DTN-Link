@@ -9,7 +9,7 @@
 5. Routing layer — epidemic, spray-and-wait, opportunistic [implemented]
 6. Storage layer — persistent SQLite queue with dedup + expiry [implemented]
 7. Convergence layer — transports [TCPCL-lite + Wi-Fi Direct owner/member implemented; BLE planned]
-8. Gateway layer — internet/satellite gateways [planned]
+8. Gateway layer — internet/satellite gateways [implemented — dtn-gateway (Phase 11)]
 9. Management layer — monitoring, diagnostics, configuration [planned]
 
 ## Current implementation (Phases 1-9)
@@ -141,10 +141,29 @@ multi-segment transfers remain future work.
   an OS-provided RFCOMM serial port already works through the serial
   feature, and the stream layer consumes any such socket once opened.
 
+### Gateways (Phase 11)
+
+dtn-gateway decides WHEN to contact a peer and then performs a
+real contact using the same wire protocol as the daemon and
+adapters (TCPCL-lite exchange, optional BPSec SecurityCtx):
+
+- **ContactPlan** — text-format plans ("addr" always open,
+  "addr start end" unix-seconds window, # comments), parse/to_text
+  round-trip, explicit tested window math (inclusive start,
+  exclusive end, opens_in).
+- **InternetGateway** — always-on peers; sweep() contacts every
+  peer with per-peer failure isolation; blocking run loop.
+- **SatelliteGateway** — pass windows: run_pass(now) contacts only
+  peers whose window is open and reports seconds to the next pass;
+  the blocking run driver sleeps between passes.
+
+See docs/gateways.md. Honest scope: static plan files (no
+TLE-driven pass prediction yet); gateway-only routing policies are
+future work.
 ## Roadmap
 
 - Phases 5-6, 8 security (done): BIB integrity, BCB confidentiality, keyring trust store, secured contacts with TOFU key learning. Next: key rotation, MITM enforcement, RFC 9173 contexts, TLS (RFC 9174 §4.4).
 - Done: Wi-Fi Direct platform glue — GroupOwner listener + member contacts with retry (dtn-transport::wifi_direct). Next: Bluetooth RFCOMM glue (an OS-provided RFCOMM serial port already works through the serial feature).
 - Phases 7-9: platform apps.
 - Done: serial/LoRa adapters (feature-gated serial + KISS framing).
-- Phase 11: gateways. Phase 12: interop + performance testing.
+- Done: Phase 11 gateways — dtn-gateway (contact plans, internet sweeps with failure isolation, satellite pass windows; docs/gateways.md). Next: Phase 12 interop + performance testing; then the management layer (diagnostics) and federation.
