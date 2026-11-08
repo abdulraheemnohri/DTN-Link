@@ -20,7 +20,7 @@ Phase 11 — internet + satellite gateways.
   run_pass(now) contacts only peers whose windows are open and
   reports seconds to the next pass; blocking wall-clock run
   driver sleeps between passes.
-- 13 new tests, all live over real loopback TCP: plan parsing
+- 11 new tests, all live over real loopback TCP: plan parsing
   round-trip + validation errors, window bounds math, sweep
   delivery with inbound counting, dead-peer failure isolation,
   closed-window no-contact with next-pass reporting, open-pass
