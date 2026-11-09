@@ -415,7 +415,7 @@ mod tests {
         let server = std::thread::spawn(move || {
             let node = mem_node(2);
             let (mut stream, _) = listener.accept().unwrap();
-            dtn_daemon::exchange(&node, &mut stream).unwrap();
+            dtn_daemon::exchange(&node, None, &mut stream).unwrap();
             tx.send(node.lock().unwrap().inbox().unwrap().len()).unwrap();
         });
 

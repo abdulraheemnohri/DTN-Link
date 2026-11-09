@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.11.0 (2026-11-09)
+
+Phase 12 — interop + performance testing suite.
+
+- dtn-bench (new crate): live benchmarks over the real stack — no
+  mocked transports, no synthetic numbers. Every report is produced
+  by moving actual BPv7 bundles through the same code paths the
+  daemon uses.
+- report: BenchReport (ops/s, MiB/s, markdown rows) and LatencySamples
+  with exact nearest-rank median/p95 helpers.
+- codec: BPv7 CBOR encode+decode throughput with per-roundtrip
+  verification and deterministic (xorshift) payloads.
+- store: real on-disk SQLite put + full-table query passes through
+  the node engine (database removed afterwards).
+- contact: full contact benchmarks — duplex memory links with
+  length-prefix and KISS framing, real loopback TCP with the
+  TCPCL-lite wire format, real RFC 9174 TCPCLv4 sessions (handshake +
+  acknowledged transfers + SESS_TERM), and per-contact TCP latency
+  sampling with median/p95 reporting.
+- Binary: cargo run -p dtn-bench --release prints a markdown
+  benchmark table plus latency percentiles.
+- 10 new tests: cross-layer interop (Ed25519-signed + AES-256-GCM
+  encrypted bundle over a KISS-framed contact; plaintext never on the
+  wire; decrypt-then-verify at the receiver), two-way TCPCLv4
+  exchange, per-transport full-delivery benchmarks, codec/store
+  roundtrips, percentile exactness on a known vector.
+- fix: dtn-transport's daemon interop test still called the daemon
+  exchange with the pre-Phase-8 two-argument signature; updated to
+  pass the security context (None).
+- docs: new docs/benchmarks.md; architecture.md marks Phase 12 done
+  (next: management/diagnostics layer, federation, Bluetooth RFCOMM
+  glue); workspace bumped to 0.11.0.
+- Honest scope: measured numbers are machine-dependent (the suite
+  reports them, it does not assert performance targets); no
+  warmup/confidence statistics; hardware serial/LoRa links reuse the
+  same contact functions once a port is opened (feature "serial").
+
 ## 0.10.0 (2026-11-08)
 
 Phase 11 — internet + satellite gateways.

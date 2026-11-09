@@ -12,7 +12,7 @@
 8. Gateway layer — internet/satellite gateways [implemented — dtn-gateway (Phase 11)]
 9. Management layer — monitoring, diagnostics, configuration [planned]
 
-## Current implementation (Phases 1-9)
+## Current implementation (Phases 1-12)
 
 ```
 +--------------------------------------------------------+
@@ -166,4 +166,4 @@ future work.
 - Done: Wi-Fi Direct platform glue — GroupOwner listener + member contacts with retry (dtn-transport::wifi_direct). Next: Bluetooth RFCOMM glue (an OS-provided RFCOMM serial port already works through the serial feature).
 - Phases 7-9: platform apps.
 - Done: serial/LoRa adapters (feature-gated serial + KISS framing).
-- Done: Phase 11 gateways — dtn-gateway (contact plans, internet sweeps with failure isolation, satellite pass windows; docs/gateways.md). Next: Phase 12 interop + performance testing; then the management layer (diagnostics) and federation.
+- Done: Phase 12 interop + performance testing — dtn-bench (live codec/store/contact benchmarks over real transports: duplex length-prefix + KISS, loopback TCP, TCPCLv4 sessions; cross-layer interop tests including signed + encrypted bundles over KISS; docs/benchmarks.md). Next: the management layer (diagnostics), federation, and Bluetooth RFCOMM glue.
