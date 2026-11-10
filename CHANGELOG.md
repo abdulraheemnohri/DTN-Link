@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.12.0 (2026-11-10)
+
+Phase 13 — management/diagnostics layer.
+
+- dtn-diagnostics (new crate): the management layer. HealthReport
+  scans the real store — totals, delivered/pending-inbox counts,
+  expired-now (same criterion as the daemon cleanup),
+  expiring-within-horizon, corrupt rows (bytes that no longer
+  decode), store size — with a HEALTHY/ATTENTION verdict and a text
+  rendering for the CLI.
+- ContactLog: SQLite-backed contact history (peer, direction in/out,
+  outcome, timestamp) with per-peer aggregation (contact count,
+  successes, last contact, staleness) and an unreachable flag for
+  peers that only ever failed. Disk persistence tested.
+- dtn-daemon: DaemonConfig::contact_log — every accepted TCPCL-lite
+  connection and every sync attempt is recorded (best-effort; logging
+  never breaks a contact); startup prints whether the contact log is
+  ON.
+- cli: new `dtn-link doctor [soon-seconds]` command — prints the
+  health report plus the per-peer contact history; `daemon` wires the
+  contact log automatically.
+- 8 new tests: health classification (pending/delivered/expired/
+  expiring-soon), healthy-node verdict, corrupt-row detection (row
+  mutated through a second SQLite connection), contact-log aggregation
+  + staleness + unreachable, direction round-trip, disk persistence,
+  daemon outcome recording, log-disabled no-op.
+- docs: new docs/diagnostics.md; architecture.md marks the management
+  layer implemented and updates the roadmap; workspace bumped to
+  0.12.0.
+- Honest scope: per-contact bundle counters are not recorded yet
+  (exchange() returns no counts), TCPCLv4 sessions and gateway
+  contacts are not logged yet, and the log is local to one node
+  (no network-wide management plane).
+
 ## 0.11.0 (2026-11-09)
 
 Phase 12 — interop + performance testing suite.
@@ -98,7 +132,7 @@ Phase 9 (adapters) — Wi-Fi Direct platform glue.
 Phase 8 — security integrated into the data path.
 
 - dtn-core: `Node::open_persistent` persists the identity seed in a
-  sidecar file (0600 on Unix) so a node keeps the same Ed25519 key
+  sidecar file (0600 on Unix) so the node keeps the same Ed25519 key
   pair across restarts; restart-identity test added.
 - dtn-daemon: optional `SecurityCtx` (keyring + identity). When
   enabled: TCPCL-lite hello now carries the node's Ed25519 public key
