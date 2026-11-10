@@ -15,6 +15,14 @@
 //! Unsigned bundles and bundles from unknown sources are accepted
 //! (logged); multiple-BIB malformed bundles are dropped.
 //!
+//! Management (this phase): when `DaemonConfig::contact_log` is set,
+//! every accepted (TCPCL-lite) connection and every sync attempt is
+//! recorded into a dtn-diagnostics ContactLog — peer EID (or address
+//! on failure), direction, outcome and timestamp — for
+//! `dtn-link doctor` to report. Honest scope: per-contact bundle
+//! counters are not recorded yet (exchange() returns no counts) and
+//! TCPCLv4 sessions are not logged yet.
+//!
 //! Honest scope: key rotation, signed key-change and TLS (RFC 9174
 //! §4.4) remain future work. A mismatch between a learned hello key
 //! and a previously trusted key currently logs a warning and does not
@@ -22,6 +30,7 @@
 
 use dtn_bpv7::{Bundle, Eid};
 use dtn_core::Node;
+use dtn_diagnostics::{ContactLog, ContactRecord, Direction};
 use dtn_keyring::{Keyring, KeyringVerifyOutcome};
 use dtn_routing::Strategy;
 use dtn_tcpcl::v4::{Event, Session, SessionError, TERM_OTHER};
@@ -40,6 +49,9 @@ pub struct DaemonConfig {
     pub db: PathBuf,
     /// SQLite keyring path. None = security disabled (plain contacts).
     pub keyring: Option<PathBuf>,
+    /// SQLite contact-log path (dtn-diagnostics). None = no contact
+    /// history recorded.
+    pub contact_log: Option<PathBuf>,
 }
 
 /// Per-node security context: trusted keys + signing identity.
@@ -47,6 +59,27 @@ pub struct SecurityCtx {
     pub keyring: Arc<Mutex<Keyring>>,
     /// Sign outbound bundles with the node identity (BIB).
     pub sign_outbound: bool,
+}
+
+/// Best-effort contact-log write; logging must never break a contact.
+fn log_contact(
+    log: &Option<Arc<Mutex<ContactLog>>>,
+    peer: &str,
+    direction: Direction,
+    ok: bool,
+) {
+    let Some(log) = log else { return };
+    let rec = ContactRecord {
+        peer: peer.to_string(),
+        started_at: dtn_storage::now(),
+        direction,
+        sent: 0,
+        received: 0,
+        ok,
+    };
+    if let Err(e) = log.lock().unwrap().record(&rec) {
+        eprintln!("[daemon] contact log write failed: {e}");
+    }
 }
 
 fn parse_eid(bytes: &[u8]) -> Eid {
@@ -226,29 +259,51 @@ pub fn exchange_v4(
     Ok(peer_eid)
 }
 
-fn serve(node: Arc<Mutex<Node>>, sec: Option<Arc<SecurityCtx>>, listener: TcpListener) {
+fn serve(
+    node: Arc<Mutex<Node>>,
+    sec: Option<Arc<SecurityCtx>>,
+    listener: TcpListener,
+    log: Option<Arc<Mutex<ContactLog>>>,
+) {
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
         let node = node.clone();
         let sec = sec.clone();
+        let log = log.clone();
         std::thread::spawn(move || {
             let res = sec.as_ref().map(|s| s.as_ref());
-            if let Err(e) = exchange(&node, res, &mut stream) {
-                eprintln!("[daemon] contact failed: {e}");
+            match exchange(&node, res, &mut stream) {
+                Ok(peer) => log_contact(&log, &peer.as_uri(), Direction::Incoming, true),
+                Err(e) => {
+                    eprintln!("[daemon] contact failed: {e}");
+                    log_contact(&log, "unknown", Direction::Incoming, false);
+                }
             }
         });
     }
 }
 
-fn sync_peers(node: Arc<Mutex<Node>>, sec: Option<Arc<SecurityCtx>>, peers: Vec<String>, interval: Duration) {
+fn sync_peers(
+    node: Arc<Mutex<Node>>,
+    sec: Option<Arc<SecurityCtx>>,
+    peers: Vec<String>,
+    interval: Duration,
+    log: Option<Arc<Mutex<ContactLog>>>,
+) {
     loop {
         for addr in &peers {
             if let Ok(mut stream) = TcpStream::connect(addr) {
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
                 let res = sec.as_ref().map(|s| s.as_ref());
-                if let Err(e) = exchange(&node, res, &mut stream) {
-                    eprintln!("[daemon] sync with {addr} failed: {e}");
+                match exchange(&node, res, &mut stream) {
+                    Ok(peer) => log_contact(&log, &peer.as_uri(), Direction::Outgoing, true),
+                    Err(e) => {
+                        eprintln!("[daemon] sync with {addr} failed: {e}");
+                        log_contact(&log, addr, Direction::Outgoing, false);
+                    }
                 }
+            } else {
+                log_contact(&log, addr, Direction::Outgoing, false);
             }
         }
         std::thread::sleep(interval);
@@ -269,17 +324,29 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<()> {
         }
         None => None,
     };
+    let contact_log = match &cfg.contact_log {
+        Some(path) => match ContactLog::open(path) {
+            Ok(l) => Some(Arc::new(Mutex::new(l))),
+            Err(e) => {
+                eprintln!("[daemon] contact log disabled ({e})");
+                None
+            }
+        },
+        None => None,
+    };
     let node = Arc::new(Mutex::new(node));
     let listener = TcpListener::bind(&cfg.listen)?;
-    println!("[daemon] listening on {} (security {})", cfg.listen,
-        if sec.is_some() { "ON — sign + TOFU key learning + verify" } else { "OFF" });
+    println!("[daemon] listening on {} (security {}, contact log {})", cfg.listen,
+        if sec.is_some() { "ON — sign + TOFU key learning + verify" } else { "OFF" },
+        if contact_log.is_some() { "ON" } else { "OFF" });
 
     {
         let sync_node = node.clone();
         let peers = cfg.peers.clone();
         let interval = cfg.sync_interval;
         let sec = sec.clone();
-        std::thread::spawn(move || sync_peers(sync_node, sec, peers, interval));
+        let log = contact_log.clone();
+        std::thread::spawn(move || sync_peers(sync_node, sec, peers, interval, log));
     }
 
     {
@@ -295,7 +362,7 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<()> {
         });
     }
 
-    serve(node, sec, listener);
+    serve(node, sec, listener, contact_log);
     Ok(())
 }
 
@@ -316,6 +383,28 @@ mod tests {
         assert_eq!(e.as_uri(), "dtn://node42");
         let e2 = parse_eid(b"node42");
         assert_eq!(e2.as_uri(), "dtn://node42");
+    }
+
+    #[test]
+    fn contact_logging_records_outcomes() {
+        let log = Some(Arc::new(Mutex::new(ContactLog::open_in_memory().unwrap())));
+        log_contact(&log, "ipn:7.0", Direction::Incoming, true);
+        log_contact(&log, "127.0.0.1:4556", Direction::Outgoing, false);
+        let l = log.as_ref().unwrap().lock().unwrap();
+        assert_eq!(l.count().unwrap(), 2);
+        let peers = l.summary().unwrap();
+        assert_eq!(peers.len(), 2);
+        let ok_peer = peers.iter().find(|p| p.peer == "ipn:7.0").unwrap();
+        assert_eq!(ok_peer.successful, 1);
+        assert!(ok_peer.ever_succeeded());
+        let failed = peers.iter().find(|p| p.peer == "127.0.0.1:4556").unwrap();
+        assert!(failed.unreachable());
+    }
+
+    #[test]
+    fn contact_logging_none_is_a_noop() {
+        let log: Option<Arc<Mutex<ContactLog>>> = None;
+        log_contact(&log, "ipn:7.0", Direction::Incoming, true);
     }
 
     #[test]
