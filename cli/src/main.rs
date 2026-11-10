@@ -1,4 +1,4 @@
-//! dtn-link CLI (Phases 1-8: secured contacts).
+//! dtn-link CLI (Phases 1-8 + management layer).
 
 use dtn_bpv7::{Bundle, Eid};
 use dtn_core::Node;
@@ -14,6 +14,21 @@ fn db_path() -> PathBuf {
     std::fs::create_dir_all(&p).ok();
     p.push("dtn.db");
     p
+}
+
+fn dtn_home() -> PathBuf {
+    let p = PathBuf::from(
+        std::env::var("DTN_LINK_HOME").unwrap_or_else(|_| ".dtn-link".into()),
+    );
+    std::fs::create_dir_all(&p).ok();
+    p
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn strategy_from(s: Option<&str>) -> Strategy {
@@ -40,6 +55,38 @@ fn main() {
             println!("Bundles:    {}", node.store.count().unwrap_or(0));
             println!("Pending:    {}", node.inbox().map(|v| v.len()).unwrap_or(0));
             println!("BP version: {}", dtn_bpv7::BPV7_VERSION);
+        }
+        Some("doctor") => {
+            let soon: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(3600);
+            let node = Node::open(1, &db_path(), Strategy::Epidemic).expect("failed to open node");
+            let now = unix_now();
+            let report = dtn_diagnostics::HealthReport::scan(&node, now, soon).expect("scan failed");
+            print!("{}", report.render_text(now, soon));
+            let log_path = dtn_home().join("contacts.db");
+            if log_path.exists() {
+                match dtn_diagnostics::ContactLog::open(&log_path) {
+                    Ok(log) => {
+                        println!("=== Contact history ===");
+                        match log.summary() {
+                            Ok(peers) if peers.is_empty() => println!("No contacts recorded yet."),
+                            Ok(peers) => {
+                                for p in peers {
+                                    println!(
+                                        "{}  contacts={} ok={} last-contact={}s-ago sent={} received={}{}",
+                                        p.peer, p.contacts, p.successful, p.stale_for(now),
+                                        p.total_sent, p.total_received,
+                                        if p.unreachable() { "  [NEVER SUCCEEDED]" } else { "" }
+                                    );
+                                }
+                            }
+                            Err(e) => eprintln!("contact log read failed: {e}"),
+                        }
+                    }
+                    Err(e) => eprintln!("contact log open failed: {e}"),
+                }
+            } else {
+                println!("No contact log yet — run the daemon to record contacts.");
+            }
         }
         Some("send") => {
             if args.len() < 3 {
@@ -113,11 +160,13 @@ fn main() {
             let keyring = if insecure {
                 None
             } else {
-                let mut home = PathBuf::from(
-                    std::env::var("DTN_LINK_HOME").unwrap_or_else(|_| ".dtn-link".into()),
-                );
-                std::fs::create_dir_all(&home).ok();
+                let mut home = dtn_home();
                 home.push("keys.db");
+                Some(home)
+            };
+            let contact_log = {
+                let mut home = dtn_home();
+                home.push("contacts.db");
                 Some(home)
             };
             let cfg = dtn_daemon::DaemonConfig {
@@ -127,6 +176,7 @@ fn main() {
                 sync_interval: Duration::from_secs(interval),
                 db: db_path(),
                 keyring,
+                contact_log,
             };
             dtn_daemon::run(cfg).expect("daemon failed");
         }
@@ -164,10 +214,7 @@ fn main() {
                 }
             } else {
                 // Keyring lookup by source EID.
-                let mut home = PathBuf::from(
-                    std::env::var("DTN_LINK_HOME").unwrap_or_else(|_| ".dtn-link".into()),
-                );
-                std::fs::create_dir_all(&home).ok();
+                let mut home = dtn_home();
                 home.push("keys.db");
                 let kr = dtn_keyring::Keyring::open(&home).expect("open keyring");
                 match dtn_keyring::verify_signed_bundle(&bundle, &kr).expect("keyring") {
@@ -241,10 +288,7 @@ fn main() {
             }
         }
         Some("keyring") => {
-            let mut home = PathBuf::from(
-                std::env::var("DTN_LINK_HOME").unwrap_or_else(|_| ".dtn-link".into()),
-            );
-            std::fs::create_dir_all(&home).ok();
+            let mut home = dtn_home();
             home.push("keys.db");
             let sub = args.get(1).map(String::as_str);
             match sub {
@@ -307,13 +351,14 @@ fn main() {
                 }
             }
         }
-        Some("version") => println!("dtn-link 0.8.0 (BPv7, secured contacts, transport adapters)"),
+        Some("version") => println!("dtn-link 0.12.0 (BPv7, TCPCLv4, BPSec, gateways, diagnostics)"),
         _ => {
             eprintln!(
                 "dtn-link — decentralized DTN communication (phases 1-6)
 usage:
   dtn-link init [node-number]
   dtn-link status
+  dtn-link doctor [expiring-soon-seconds]
   dtn-link send <dtn://dest> <message> [lifetime-seconds]
   dtn-link receive        (bundle bytes on stdin)
   dtn-link bundles
