@@ -10,21 +10,23 @@
 6. Storage layer — persistent SQLite queue with dedup + expiry [implemented]
 7. Convergence layer — transports [TCPCL-lite + Wi-Fi Direct owner/member implemented; BLE planned]
 8. Gateway layer — internet/satellite gateways [implemented — dtn-gateway (Phase 11)]
-9. Management layer — monitoring, diagnostics, configuration [planned]
+9. Management layer — monitoring, diagnostics, configuration [implemented — dtn-diagnostics (health reports + contact log)]
 
-## Current implementation (Phases 1-12)
+## Current implementation (Phases 1-12 + management layer)
 
 ```
 +--------------------------------------------------------+
 | cli: init/status/send/receive/bundles/forward/daemon/   |
-|     verify/decode                                        |
+|     doctor/verify/decode                                |
 +--------------------------------------------------------+
 | dtn-daemon: contacts with sign/verify + TOFU key learn |
+|   + contact-outcome logging (dtn-diagnostics)           |
 | dtn-transport: framing codecs (length-prefix, KISS) +   |
 |   streams + Wi-Fi Direct group owner/member glue        |
 +--------------------------------------------------------+
 | dtn-bpsec: BIB (type 11) Ed25519 sig + BCB (type 12)   |
 | dtn-keyring: trusted keys per EID (TOFU trust store)    |
+| dtn-diagnostics: HealthReport + ContactLog (doctor)     |
 +--------------------------------------------------------+
 | dtn-core: Node                                          |
 |   send()        -> Bundle -> store                      |
@@ -160,10 +162,32 @@ adapters (TCPCL-lite exchange, optional BPSec SecurityCtx):
 See docs/gateways.md. Honest scope: static plan files (no
 TLE-driven pass prediction yet); gateway-only routing policies are
 future work.
+
+### Diagnostics (management layer)
+
+dtn-diagnostics answers two operational questions without moving
+any bundles:
+
+- **HealthReport::scan(&Node, now, soon)** — store-wide scan: totals,
+  delivered vs pending-inbox, expired-now (the daemon cleanup
+  criterion), expiring-within-horizon, corrupt rows, store size;
+  HEALTHY/ATTENTION verdict; text rendering for the CLI.
+- **ContactLog** — SQLite-backed contact history. The daemon records
+  every accepted TCPCL-lite connection and every sync attempt (peer
+  EID or dial address, direction, outcome, timestamp); summary()
+  aggregates per peer (contact count, successes, last contact,
+  staleness) and flags never-succeeded peers as unreachable.
+
+CLI: `dtn-link doctor [soon-seconds]` prints the health report plus
+the per-peer contact history. See docs/diagnostics.md. Honest scope:
+per-contact bundle counters, TCPCLv4/gateway contact logging and a
+network-wide management plane are future work.
+
 ## Roadmap
 
 - Phases 5-6, 8 security (done): BIB integrity, BCB confidentiality, keyring trust store, secured contacts with TOFU key learning. Next: key rotation, MITM enforcement, RFC 9173 contexts, TLS (RFC 9174 §4.4).
 - Done: Wi-Fi Direct platform glue — GroupOwner listener + member contacts with retry (dtn-transport::wifi_direct). Next: Bluetooth RFCOMM glue (an OS-provided RFCOMM serial port already works through the serial feature).
 - Phases 7-9: platform apps.
 - Done: serial/LoRa adapters (feature-gated serial + KISS framing).
-- Done: Phase 12 interop + performance testing — dtn-bench (live codec/store/contact benchmarks over real transports: duplex length-prefix + KISS, loopback TCP, TCPCLv4 sessions; cross-layer interop tests including signed + encrypted bundles over KISS; docs/benchmarks.md). Next: the management layer (diagnostics), federation, and Bluetooth RFCOMM glue.
+- Done: Phase 12 interop + performance testing — dtn-bench (live codec/store/contact benchmarks over real transports: duplex length-prefix + KISS, loopback TCP, TCPCLv4 sessions; cross-layer interop tests including signed + encrypted bundles over KISS; docs/benchmarks.md).
+- Done: management/diagnostics layer — dtn-diagnostics (HealthReport + ContactLog, dtn-link doctor, daemon contact recording; docs/diagnostics.md). Next: federation and Bluetooth RFCOMM glue; later: per-contact counters, TCPCLv4/gateway contact logging, network-wide management.

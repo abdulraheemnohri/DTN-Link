@@ -9,7 +9,7 @@ without requiring a SIM card, cellular subscription or Wi-Fi router for every
 communication. It uses Bundle Protocol v7 (RFC 9171), store-carry-forward
 routing, modular physical transport adapters and optional internet gateways.
 
-## Status: Phases 1-8 (Rust core, TCP transports, security stack, transport adapters)
+## Status: Phases 1-12 + management layer (core, transports, security, adapters, gateways, diagnostics)
 
 | Component | Status |
 |---|---|
@@ -28,11 +28,14 @@ routing, modular physical transport adapters and optional internet gateways.
 | Modular transport adapters: framing codecs + generic stream exchange | implemented + tested (crates/dtn-transport) |
 | KISS framing for LoRa TNCs / serial radio modems | implemented + tested (crates/dtn-transport::kiss) |
 | Serial-port hardware glue (cargo feature "serial") | implemented, feature-gated |
-| CLI | implemented — init/status/send/receive/bundles/forward/daemon/verify/keyring/encrypt/decrypt/decode |
+| Internet & satellite gateways (contact plans, pass windows) | implemented + tested (crates/dtn-gateway) |
+| Interop + performance benchmark suite | implemented + tested (crates/dtn-bench) |
+| Diagnostics: health reports + contact history (`dtn-link doctor`) | implemented + tested (crates/dtn-diagnostics) |
+| CLI | implemented — init/status/send/receive/bundles/forward/daemon/doctor/verify/keyring/encrypt/decrypt/decode |
 | RFC 9173 context identifiers; signed key rotation | future |
-| Bluetooth RFCOMM / Wi-Fi Direct platform glue (stream layer ready) | next phase |
+| Bluetooth RFCOMM platform glue (stream layer ready) | next phase |
 | Android / iOS / Windows / Linux apps | Phases 7-9 |
-| Internet & satellite gateways | Phase 11 |
+| Federation (network-of-networks) | future |
 
 ## Build
 
@@ -55,11 +58,13 @@ For LoRa TNC / serial radio hardware support:
     dtn-link daemon --listen 127.0.0.1:4557 --peers 127.0.0.1:4556
     dtn-link send dtn://node-b "hello over DTN"
     dtn-link bundles
+    dtn-link doctor      # health report + contact history
 
 ## Architecture
 
-See [docs/architecture.md](docs/architecture.md) and
-[docs/adapters.md](docs/adapters.md).
+See [docs/architecture.md](docs/architecture.md),
+[docs/adapters.md](docs/adapters.md) and
+[docs/diagnostics.md](docs/diagnostics.md).
 
 ## Standards
 
