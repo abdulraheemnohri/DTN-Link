@@ -1,0 +1,12 @@
+[package]
+name = "dtn-diagnostics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DTN-Link management layer: health reports and contact diagnostics"
+
+[dependencies]
+dtn-bpv7.workspace = true
+dtn-core.workspace = true
+dtn-storage.workspace = true
+rusqlite.workspace = true
