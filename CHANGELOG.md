@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.13.0 (2026-11-11)
+
+Phase 14 — federation + Bluetooth RFCOMM glue.
+
+- dtn-federation (new crate): inter-region routing policy on top of
+  real contacts. RegionMap maps EID URI prefixes to regions (longest
+  prefix wins, text format with parse/to_text round-trip); Federation
+  holds the local region plus one gateway peer per remote region
+  (text plan: "local <region>" + "<region> <gateway-eid> <addr>"
+  lines, parse/to_text round-trip); route_to() returns an explainable
+  Local / ViaGateway / NoRoute decision for any destination
+  (including known-region-no-gateway).
+- Federation::sweep: scans the real store, finds remote regions with
+  pending (not-yet-delivered) bundles and performs a full dtn-gateway
+  contact — the same TCPCL-lite exchange with the optional security
+  stack the daemon uses — against each responsible gateway.
+  Per-gateway failure isolation (a dead gateway never blocks a live
+  one); pending regions without a configured gateway are reported as
+  skipped. Intra-region and unknown-region destinations trigger no
+  contact at all.
+- dtn-transport::bluetooth: RFCOMM glue — contact_stream runs the
+  standard wire format over any OS-provided RFCOMM byte link
+  (/dev/rfcomm0, Windows SPP COM ports, macOS serial-port devices);
+  retry() is a hardware-independent retry helper for intermittent
+  Bluetooth links (retries connection failures, reports protocol
+  errors immediately); feature-gated open_rfcomm/contact/
+  contact_with_retry open an OS-paired Bluetooth SPP serial device
+  via the serialport crate.
+- 13 new tests, all live: federation over real loopback TCP (a field
+  node federates a bundle to an hq gateway node which holds it for
+  the last hop; local + unknown-region destinations trigger no
+  contact; dead-gateway failure isolation), region-map longest-prefix
+  + round-trips + parse errors, plan round-trip + parse errors,
+  route_to decisions, RFCOMM contact two-way over a byte link, retry
+  semantics (success after transient failures, immediate protocol
+  errors, exhausted retries, zero-attempts-still-dials-once).
+- docs: new docs/federation.md; adapters.md gains the Bluetooth
+  RFCOMM section and updated honest scope; architecture.md marks the
+  federation layer implemented and updates the roadmap; workspace
+  bumped to 0.13.0.
+- Honest scope: federation is routing policy, not a topology database
+  (the receiving gateway forwards with its own routing engine); no
+  per-region security policy; no CLI command yet. RFCOMM pairing and
+  socket creation belong to the OS — an OS-paired SPP serial device
+  works today via the serial feature.
+
+
 ## 0.12.0 (2026-11-10)
 
 Phase 13 — management/diagnostics layer.

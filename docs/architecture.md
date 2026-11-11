@@ -8,11 +8,12 @@
 4. Security layer — BPSec (RFC 9172) [BIB integrity implemented]
 5. Routing layer — epidemic, spray-and-wait, opportunistic [implemented]
 6. Storage layer — persistent SQLite queue with dedup + expiry [implemented]
-7. Convergence layer — transports [TCPCL-lite + Wi-Fi Direct owner/member implemented; BLE planned]
+7. Convergence layer — transports [TCPCL-lite + Wi-Fi Direct owner/member + Bluetooth RFCOMM glue implemented]
 8. Gateway layer — internet/satellite gateways [implemented — dtn-gateway (Phase 11)]
 9. Management layer — monitoring, diagnostics, configuration [implemented — dtn-diagnostics (health reports + contact log)]
+10. Federation layer — inter-region routing via gateway peers [implemented — dtn-federation (Phase 14)]
 
-## Current implementation (Phases 1-12 + management layer)
+## Current implementation (Phases 1-14)
 
 ```
 +--------------------------------------------------------+
@@ -22,8 +23,11 @@
 | dtn-daemon: contacts with sign/verify + TOFU key learn |
 |   + contact-outcome logging (dtn-diagnostics)           |
 | dtn-transport: framing codecs (length-prefix, KISS) +   |
-|   streams + Wi-Fi Direct group owner/member glue        |
+|   streams + Wi-Fi Direct group owner/member glue +       |
+|   Bluetooth RFCOMM glue (contact + retry + SPP serial)  |
 +--------------------------------------------------------+
+| dtn-federation: RegionMap + gateway plan + sweeps      |
+|   over real dtn-gateway contacts (inter-region routing)  |
 | dtn-bpsec: BIB (type 11) Ed25519 sig + BCB (type 12)   |
 | dtn-keyring: trusted keys per EID (TOFU trust store)    |
 | dtn-diagnostics: HealthReport + ContactLog (doctor)     |
@@ -139,9 +143,15 @@ multi-segment transfers remain future work.
   keeps dialing while the group is still forming. Group formation
   (WPS pairing, owner election) stays in the OS; tests exercise both
   sides over real loopback TCP.
-- Honest scope: Bluetooth RFCOMM OS socket glue is the next milestone;
-  an OS-provided RFCOMM serial port already works through the serial
-  feature, and the stream layer consumes any such socket once opened.
+- **Bluetooth RFCOMM (Phase 14)**: `bluetooth::contact_stream` runs
+  the standard wire format over any OS-provided RFCOMM byte link;
+  `bluetooth::retry` is a hardware-independent retry helper for
+  intermittent Bluetooth links (io failures retried, protocol errors
+  reported immediately); with cargo feature "serial",
+  `open_rfcomm`/`contact`/`contact_with_retry` open an OS-paired
+  Bluetooth SPP serial device (/dev/rfcomm0, Windows SPP COM ports).
+  Pairing and RFCOMM socket creation belong to the OS; tests prove the
+  contact path over a byte link plus the retry semantics.
 
 ### Gateways (Phase 11)
 
@@ -183,11 +193,29 @@ the per-peer contact history. See docs/diagnostics.md. Honest scope:
 per-contact bundle counters, TCPCLv4/gateway contact logging and a
 network-wide management plane are future work.
 
+### Federation (Phase 14 — inter-region routing)
+
+dtn-federation is routing policy plus real contacts: RegionMap
+assigns EIDs to regions (prefix match, longest wins), the
+Federation plan names one gateway peer per remote region, and
+route_to() answers Local / ViaGateway / NoRoute for any
+destination. sweep() scans the store for pending bundles destined
+to remote regions and contacts each responsible gateway with a full
+dtn-gateway contact — per-gateway failure isolation; pending
+regions without a gateway are reported as skipped. Intra-region and
+unknown-region destinations trigger no contact at all. See
+docs/federation.md. Honest scope: the receiving gateway forwards
+with its own routing engine (policy only, no topology database);
+no per-region security policy; no CLI command yet.
+
 ## Roadmap
 
 - Phases 5-6, 8 security (done): BIB integrity, BCB confidentiality, keyring trust store, secured contacts with TOFU key learning. Next: key rotation, MITM enforcement, RFC 9173 contexts, TLS (RFC 9174 §4.4).
-- Done: Wi-Fi Direct platform glue — GroupOwner listener + member contacts with retry (dtn-transport::wifi_direct). Next: Bluetooth RFCOMM glue (an OS-provided RFCOMM serial port already works through the serial feature).
+- Done: Wi-Fi Direct platform glue — GroupOwner listener + member contacts with retry (dtn-transport::wifi_direct).
+- Done: Bluetooth RFCOMM glue — dtn-transport::bluetooth (contact_stream + retry; feature-gated OS SPP serial opening).
 - Phases 7-9: platform apps.
 - Done: serial/LoRa adapters (feature-gated serial + KISS framing).
 - Done: Phase 12 interop + performance testing — dtn-bench (live codec/store/contact benchmarks over real transports: duplex length-prefix + KISS, loopback TCP, TCPCLv4 sessions; cross-layer interop tests including signed + encrypted bundles over KISS; docs/benchmarks.md).
-- Done: management/diagnostics layer — dtn-diagnostics (HealthReport + ContactLog, dtn-link doctor, daemon contact recording; docs/diagnostics.md). Next: federation and Bluetooth RFCOMM glue; later: per-contact counters, TCPCLv4/gateway contact logging, network-wide management.
+- Done: management/diagnostics layer — dtn-diagnostics (HealthReport + ContactLog, dtn-link doctor, daemon contact recording; docs/diagnostics.md).
+- Done: federation layer — dtn-federation (RegionMap, gateway plan, route_to policy, sweep over real gateway contacts; docs/federation.md).
+- Next: per-contact bundle counters, TCPCLv4/gateway/federation contact logging, a network-wide management plane, per-region security policy, a federation CLI command; later: RFC 9173 contexts, TLS (RFC 9174 §4.4), key rotation, MITM enforcement, TLE-driven pass prediction.

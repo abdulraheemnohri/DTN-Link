@@ -42,9 +42,10 @@ exchange_framed<S: Read + Write> accepts any stream:
 * **Wi-Fi Direct** — `dtn_transport::wifi_direct` (below): the group
   owner listens on TCP and members connect, with a retrying member
   helper for groups that are still forming.
-* **Bluetooth** — once the OS pairing provides an RFCOMM/L2CAP socket
-  (byte stream), exchange_framed runs over it unchanged. Platform
-  glue for socket creation is the next milestone.
+* **Bluetooth** — `dtn_transport::bluetooth` (below): RFCOMM glue —
+  contact_stream runs the standard wire format over any OS-provided
+  RFCOMM byte link, retry() handles intermittent links, and the
+  serial feature opens OS-paired Bluetooth SPP devices.
 * **Serial / LoRa** — see below.
 
 ## Wi-Fi Direct (wifi_direct)
@@ -83,6 +84,43 @@ TCP: two-way bundle delivery, a member retrying until a late owner
 binds, sequential service of multiple members by one owner, and
 immediate reporting of protocol-level errors.
 
+## Bluetooth RFCOMM (bluetooth)
+
+Once the OS pairs a Bluetooth device and exposes its Serial Port
+Profile (SPP) link as a byte stream (/dev/rfcomm0 on Linux, the COM
+port Windows creates for a paired SPP device, /dev/tty.<device>-
+SerialPort on macOS), RFCOMM is a plain byte link and the standard
+contact exchange runs over it unchanged:
+
+```rust
+use std::sync::{Arc, Mutex};
+use dtn_core::{Node, Strategy};
+
+let node = Arc::new(Mutex::new(
+    Node::open(1, &".dtn-link/dtn.db".into(), Strategy::Epidemic).unwrap()));
+
+// Over any platform-created RFCOMM socket / stream:
+let peer = dtn_transport::bluetooth::contact_stream(&node, &mut stream)?;
+
+// With cargo feature "serial", over an OS-paired SPP serial device,
+// retrying while the peer device is out of range or asleep:
+let peer = dtn_transport::bluetooth::contact_with_retry(
+    &node, "/dev/rfcomm0", dtn_transport::bluetooth::DEFAULT_BAUD,
+    30, std::time::Duration::from_millis(500))?;
+```
+
+Bluetooth links are intermittent: `retry` retries connection-level
+failures and reports protocol-level errors immediately (retrying
+cannot fix a malformed frame). A retried contact cannot duplicate
+bundles — the node engine dedups on (source EID, creation
+timestamp). Pairing and RFCOMM socket creation belong to the OS
+(Bluetooth settings / sdptool / Android BluetoothAdapter).
+
+Tests prove the contact path over an in-memory byte link (the same
+code runs over a real RFCOMM port once one is opened) and the retry
+semantics: success after transient failures, immediate protocol
+errors, exhausted retries, zero-attempts-still-dials-once.
+
 ## Serial and LoRa (feature "serial")
 
     cargo build -p dtn-transport --features serial
@@ -114,12 +152,16 @@ test suite covers:
 * two-way bundle exchanges over in-memory links (both codecs),
 * TCP interop between the generic exchange and dtn-daemon,
 * Wi-Fi Direct group-owner/member contacts over real loopback TCP
-  (delivery, late-owner retry, sequential members, error reporting).
+  (delivery, late-owner retry, sequential members, error reporting),
+* Bluetooth RFCOMM contact over a byte link plus retry semantics
+  (transient-failure recovery, immediate protocol errors, exhausted
+  retries).
 
 ## Honest scope
 
-Bluetooth RFCOMM platform glue (OS socket creation, pairing UI) is not
-in this crate yet; the transport layer is ready for it — and an
-OS-provided RFCOMM serial port already works today through the serial
-feature. Internet/satellite gateways are implemented in the dtn-gateway crate (docs/gateways.md); federation comes in a later
-phases.
+Pairing and RFCOMM socket creation belong to the OS; an OS-paired
+SPP serial device works today via the serial feature, and any
+platform-created RFCOMM socket works through contact_stream /
+exchange_framed. Internet/satellite gateways are implemented in the
+dtn-gateway crate (docs/gateways.md); inter-region federation is
+implemented in the dtn-federation crate (docs/federation.md).
