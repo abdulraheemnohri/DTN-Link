@@ -1,0 +1,12 @@
+[package]
+name = "dtn-federation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Federation layer for DTN-Link — inter-region routing via gateway peers over real contacts"
+
+[dependencies]
+dtn-bpv7.workspace = true
+dtn-core.workspace = true
+dtn-daemon.workspace = true
+dtn-gateway.workspace = true

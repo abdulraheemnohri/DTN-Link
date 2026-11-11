@@ -14,6 +14,11 @@
 //!   Read + Write stream: TCP sockets, serial ports, Bluetooth RFCOMM
 //!   sockets, Wi-Fi Direct group-owner sockets.
 //! * duplex — an in-memory byte-stream pair for testing adapters.
+//! * bluetooth — RFCOMM glue: the standard contact exchange over
+//!   any OS-provided RFCOMM byte link, a hardware-independent retry
+//!   helper for intermittent Bluetooth links, and (cargo feature
+//!   "serial") opening of OS-paired Bluetooth SPP serial devices
+//!   such as /dev/rfcomm0.
 //! * serial (cargo feature "serial") — real serial-port glue via
 //!   the serialport crate for LoRa TNC / radio-modem hardware.
 //! * wifi_direct — Wi-Fi Direct group glue: the group owner listens
@@ -24,6 +29,7 @@
 //! bundle accepted on any transport is stored, routed and re-forwarded
 //! on any other transport.
 
+pub mod bluetooth;
 pub mod duplex;
 pub mod kiss;
 #[cfg(feature = "serial")]
