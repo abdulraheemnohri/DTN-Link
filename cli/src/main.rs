@@ -1,4 +1,4 @@
-//! dtn-link CLI (Phases 1-8 + management layer).
+//! dtn-link CLI (Phases 1-8 + management + federation layers).
 
 use dtn_bpv7::{Bundle, Eid};
 use dtn_core::Node;
@@ -340,6 +340,157 @@ fn main() {
                 }
             }
         }
+        Some("federation") => {
+            // usage:
+            //   dtn-link federation show  <plan-file> [regions-file]
+            //   dtn-link federation route <plan-file> <regions-file> <eid>
+            //   dtn-link federation sweep <plan-file> <regions-file> [--insecure]
+            let sub = args.get(1).map(String::as_str);
+            let plan_file = match sub {
+                Some("show") => args.get(2),
+                Some("route") | Some("sweep") => args.get(2),
+                _ => None,
+            };
+            let Some(plan_file) = plan_file else {
+                eprintln!(
+                    "usage:\n  dtn-link federation show  <plan-file> [regions-file]\n  dtn-link federation route <plan-file> <regions-file> <eid>\n  dtn-link federation sweep <plan-file> <regions-file> [--insecure]"
+                );
+                std::process::exit(2);
+            };
+            let plan_text = std::fs::read_to_string(plan_file).unwrap_or_else(|e| {
+                eprintln!("cannot read plan file {plan_file}: {e}");
+                std::process::exit(1);
+            });
+            let fed = dtn_federation::Federation::parse(&plan_text).unwrap_or_else(|e| {
+                eprintln!("invalid federation plan: {e}");
+                std::process::exit(1);
+            });
+            let regions_file = args.get(3);
+            let fed = match regions_file {
+                Some(rf) => {
+                    let text = std::fs::read_to_string(rf).unwrap_or_else(|e| {
+                        eprintln!("cannot read regions file {rf}: {e}");
+                        std::process::exit(1);
+                    });
+                    let map = dtn_federation::RegionMap::parse(&text).unwrap_or_else(|e| {
+                        eprintln!("invalid region map: {e}");
+                        std::process::exit(1);
+                    });
+                    fed.with_regions(map)
+                }
+                None => fed,
+            };
+
+            match sub {
+                Some("show") => {
+                    println!("Local region:  {}", fed.local_region);
+                    println!("Gateways:");
+                    if fed.gateways.is_empty() {
+                        println!("  (none configured)");
+                    }
+                    for g in &fed.gateways {
+                        println!(
+                            "  {:<10} {:<16} {}  [policy: {}]",
+                            g.region,
+                            g.eid.as_uri(),
+                            g.addr,
+                            fed.policy_of(&g.region).as_str()
+                        );
+                    }
+                    if regions_file.is_none() {
+                        println!("(no regions file given — route/sweep need EID membership)");
+                    }
+                }
+                Some("route") => {
+                    let Some(eid_s) = args.get(4) else {
+                        eprintln!("usage: dtn-link federation route <plan-file> <regions-file> <eid>");
+                        std::process::exit(2);
+                    };
+                    let eid = parse_cli_eid(eid_s);
+                    match fed.route_to(&eid) {
+                        dtn_federation::Decision::Local => {
+                            println!("LOCAL — {} is in region '{}'; intra-region store-carry-forward handles it", eid.as_uri(), fed.local_region);
+                        }
+                        dtn_federation::Decision::ViaGateway(g) => {
+                            println!(
+                                "VIA GATEWAY — {} is in region '{}'; next hop {} ({}), policy {}",
+                                eid.as_uri(), g.region, g.eid.as_uri(), g.addr,
+                                fed.policy_of(&g.region).as_str()
+                            );
+                        }
+                        dtn_federation::Decision::NoRoute => {
+                            println!("NO ROUTE — no region membership for {} or no gateway configured", eid.as_uri());
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                Some("sweep") => {
+                    let insecure = args.iter().any(|a| a == "--insecure");
+                    let keyring = if insecure {
+                        None
+                    } else {
+                        let mut home = dtn_home();
+                        home.push("keys.db");
+                        Some(home)
+                    };
+                    let sec = keyring.map(|p| {
+                        let kr = dtn_keyring::Keyring::open(&p).expect("open keyring");
+                        dtn_daemon::SecurityCtx {
+                            keyring: std::sync::Arc::new(std::sync::Mutex::new(kr)),
+                            sign_outbound: true,
+                        }
+                    });
+                    let contact_log = {
+                        let mut home = dtn_home();
+                        home.push("contacts.db");
+                        Some(home)
+                    };
+                    let log = contact_log.and_then(|p| match dtn_diagnostics::ContactLog::open(&p) {
+                        Ok(l) => Some(std::sync::Arc::new(std::sync::Mutex::new(l))),
+                        Err(e) => {
+                            eprintln!("contact log disabled ({e})");
+                            None
+                        }
+                    });
+                    let node = std::sync::Arc::new(std::sync::Mutex::new(
+                        Node::open(1, &db_path(), Strategy::Epidemic).expect("failed to open node"),
+                    ));
+                    println!(
+                        "Federation sweep: local region '{}', {} gateway(s), security {}",
+                        fed.local_region,
+                        fed.gateways.len(),
+                        if sec.is_some() { "ON" } else { "OFF" }
+                    );
+                    let report = match log.as_ref() {
+                        Some(l) => fed.sweep_logged(&node, sec.as_ref(), Some(l)),
+                        None => fed.sweep(&node, sec.as_ref()),
+                    };
+                    for (region, r) in &report.successes {
+                        println!(
+                            "  OK       {region}: gateway {} received {} bundle(s), we got {} back",
+                            r.peer.as_uri(), r.sent, r.inbound
+                        );
+                    }
+                    for (region, e) in &report.failures {
+                        println!("  FAILED   {region}: {e}");
+                    }
+                    for region in &report.skipped {
+                        println!("  SKIPPED  {region}: pending bundles but no gateway configured");
+                    }
+                    for (region, why) in &report.blocked {
+                        println!("  BLOCKED  {region}: {why}");
+                    }
+                    if report.successes.is_empty()
+                        && report.failures.is_empty()
+                        && report.skipped.is_empty()
+                        && report.blocked.is_empty()
+                    {
+                        println!("Nothing to federate — no pending bundles for remote regions.");
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
         Some("decode") => {
             let mut wire = Vec::new();
             std::io::stdin().read_to_end(&mut wire).expect("stdin");
@@ -351,7 +502,7 @@ fn main() {
                 }
             }
         }
-        Some("version") => println!("dtn-link 0.12.0 (BPv7, TCPCLv4, BPSec, gateways, diagnostics)"),
+        Some("version") => println!("dtn-link 0.14.0 (BPv7, TCPCLv4, BPSec, gateways, federation, diagnostics)"),
         _ => {
             eprintln!(
                 "dtn-link — decentralized DTN communication (phases 1-6)
@@ -366,6 +517,9 @@ usage:
   dtn-link daemon --listen 0.0.0.0:4556 [--peers host:port,...] [--strategy epidemic|spray|opportunistic] [--interval 30] [--insecure]
   dtn-link verify <pubkey-hex>   (bundle bytes on stdin)
   dtn-link decode         (bundle bytes on stdin, prints structure)
+  dtn-link federation show <plan-file> [regions-file]
+  dtn-link federation route <plan-file> <regions-file> <eid>
+  dtn-link federation sweep <plan-file> <regions-file> [--insecure]
   dtn-link version"
             );
             std::process::exit(2);
@@ -387,4 +541,14 @@ fn hex_to_32(s: &str) -> Option<[u8; 32]> {
         out[i] = (hi << 4) | lo;
     }
     Some(out)
+}
+
+
+fn parse_cli_eid(s: &str) -> Eid {
+    if let Some(rest) = s.strip_prefix("ipn:") {
+        let (n, svc) = rest.split_once('.').unwrap_or_else(|| (rest, "0"));
+        Eid::ipn(n.parse().unwrap_or(0), svc.parse().unwrap_or(0))
+    } else {
+        Eid::dtn(s.trim().trim_start_matches("dtn://").trim_end_matches('/'))
+    }
 }

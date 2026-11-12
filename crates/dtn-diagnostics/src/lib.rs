@@ -1,17 +1,20 @@
-//! dtn-diagnostics — the DTN-Link management layer: node health
 //! reports and contact diagnostics.
 //!
 //! Two surfaces:
 //!   * `HealthReport::scan(&Node, now, soon)` — a store-wide health
 //!     scan (totals, delivered/pending, expired now, expiring soon,
 //!     corrupt rows, store size) with a text rendering for the CLI.
-//!   * `ContactLog` — a SQLite-backed log of contacts (peer,
-//!     direction, outcome, sent/received counters, timestamp) with
-//!     per-peer aggregation (`summary`) and staleness reporting.
+//!   * `ContactLog` — a SQLite-backed log of contacts (peer, kind,
+//!     direction, outcome, sent/received bundle counters, timestamp)
+//!     with per-peer aggregation (`summary`) and staleness reporting.
 //!
-//! Honest scope: the daemon records contact outcomes (peer, direction,
-//! success) but not per-contact bundle counters yet, and the log is
-//! local to one node — there is no network-wide management plane.
+//! Contact kinds: ordinary daemon peers (`Kind::Peer`), gateway
+//! contacts (`Kind::Gateway`) and federation gateway sweeps
+//! (`Kind::Federation`) all land in the same log, tagged, so
+//! `dtn-link doctor` can show where traffic actually flows.
+//!
+//! Honest scope: the log is local to one node — there is no
+//! network-wide management plane yet.
 
 use dtn_bpv7::Bundle;
 use dtn_core::Node;
@@ -156,15 +159,48 @@ impl Direction {
     }
 }
 
+/// What kind of link produced this contact record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// An ordinary daemon peer contact (TCPCL-lite or TCPCLv4).
+    Peer,
+    /// A dtn-gateway contact (internet or satellite pass).
+    Gateway,
+    /// A federation sweep contact with a remote-region gateway.
+    Federation,
+}
+
+impl Kind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Kind::Peer => "peer",
+            Kind::Gateway => "gateway",
+            Kind::Federation => "federation",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "peer" => Some(Kind::Peer),
+            "gateway" => Some(Kind::Gateway),
+            "federation" => Some(Kind::Federation),
+            _ => None,
+        }
+    }
+}
+
 /// One completed (or failed) contact attempt.
 #[derive(Debug, Clone)]
 pub struct ContactRecord {
     pub peer: String,
     pub started_at: u64,
     pub direction: Direction,
+    /// Bundles this node pushed to the peer during the contact.
     pub sent: usize,
+    /// Bundles this node accepted from the peer during the contact.
     pub received: usize,
     pub ok: bool,
+    /// Which layer performed the contact.
+    pub kind: Kind,
 }
 
 /// Per-peer aggregate over the contact log.
@@ -209,6 +245,21 @@ impl ContactLog {
                received INTEGER NOT NULL,
                ok INTEGER NOT NULL);",
         )?;
+        // Migration: databases created before the kind column existed
+        // get it backfilled with the default ('peer').
+        let has_kind: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('contacts') WHERE name = 'kind'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if !has_kind {
+            conn.execute_batch(
+                "ALTER TABLE contacts ADD COLUMN kind TEXT NOT NULL DEFAULT 'peer';",
+            )?;
+        }
         Ok(ContactLog { conn })
     }
 
@@ -218,15 +269,16 @@ impl ContactLog {
 
     pub fn record(&mut self, r: &ContactRecord) -> Result<(), rusqlite::Error> {
         self.conn.execute(
-            "INSERT INTO contacts (peer, started_at, direction, sent, received, ok)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO contacts (peer, started_at, direction, sent, received, ok, kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 r.peer,
                 r.started_at as i64,
                 r.direction.as_str(),
                 r.sent as i64,
                 r.received as i64,
-                r.ok as i64
+                r.ok as i64,
+                r.kind.as_str(),
             ],
         )?;
         Ok(())
@@ -238,31 +290,47 @@ impl ContactLog {
             .map(|c| c as usize)
     }
 
+    fn row_to_record(r: &rusqlite::Row<'_>) -> Result<ContactRecord, rusqlite::Error> {
+        let dir: String = r.get(2)?;
+        let kind: String = r.get(6)?;
+        Ok(ContactRecord {
+            peer: r.get(0)?,
+            started_at: r.get::<_, i64>(1)? as u64,
+            direction: Direction::parse(&dir).unwrap_or(Direction::Incoming),
+            sent: r.get::<_, i64>(3)? as usize,
+            received: r.get::<_, i64>(4)? as usize,
+            ok: r.get::<_, i64>(5)? != 0,
+            kind: Kind::parse(&kind).unwrap_or(Kind::Peer),
+        })
+    }
+
     pub fn contacts_since(&self, since: u64) -> Result<Vec<ContactRecord>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT peer, started_at, direction, sent, received, ok
+            "SELECT peer, started_at, direction, sent, received, ok, kind
              FROM contacts WHERE started_at >= ?1 ORDER BY started_at",
         )?;
-        let rows = stmt.query_map(params![since as i64], |r| {
-            let dir: String = r.get(2)?;
-            Ok(ContactRecord {
-                peer: r.get(0)?,
-                started_at: r.get::<_, i64>(1)? as u64,
-                direction: Direction::parse(&dir).unwrap_or(Direction::Incoming),
-                sent: r.get::<_, i64>(3)? as usize,
-                received: r.get::<_, i64>(4)? as usize,
-                ok: r.get::<_, i64>(5)? != 0,
-            })
-        })?;
+        let rows = stmt.query_map(params![since as i64], Self::row_to_record)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     /// Per-peer aggregates, most recently contacted first.
     pub fn summary(&self) -> Result<Vec<PeerSummary>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare(
+        self.summary_where("")
+    }
+
+    /// Per-peer aggregates restricted to one contact kind.
+    pub fn summary_of(&self, kind: Kind) -> Result<Vec<PeerSummary>, rusqlite::Error> {
+        self.summary_where(&format!(" WHERE kind = '{}'", kind.as_str()))
+    }
+
+    fn summary_where(&self, extra_where: &str) -> Result<Vec<PeerSummary>, rusqlite::Error> {
+        // extra_where is only ever built from the fixed Kind strings
+        // above (as_str), never from user input.
+        let sql = format!(
             "SELECT peer, COUNT(*), SUM(ok), MAX(started_at), SUM(sent), SUM(received)
-             FROM contacts GROUP BY peer ORDER BY MAX(started_at) DESC",
-        )?;
+             FROM contacts{extra_where} GROUP BY peer ORDER BY MAX(started_at) DESC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([], |r| {
             Ok(PeerSummary {
                 peer: r.get(0)?,
@@ -362,14 +430,17 @@ mod tests {
         log.record(&ContactRecord {
             peer: "ipn:2.0".into(), started_at: 1000,
             direction: Direction::Outgoing, sent: 3, received: 0, ok: true,
+            kind: Kind::Peer,
         }).unwrap();
         log.record(&ContactRecord {
             peer: "ipn:2.0".into(), started_at: 2000,
             direction: Direction::Incoming, sent: 0, received: 2, ok: true,
+            kind: Kind::Peer,
         }).unwrap();
         log.record(&ContactRecord {
             peer: "ipn:9.0".into(), started_at: 3000,
             direction: Direction::Outgoing, sent: 0, received: 0, ok: false,
+            kind: Kind::Peer,
         }).unwrap();
         assert_eq!(log.count().unwrap(), 3);
 
@@ -407,6 +478,45 @@ mod tests {
     }
 
     #[test]
+    fn kind_roundtrips_and_filters() {
+        assert_eq!(Kind::parse(Kind::Peer.as_str()), Some(Kind::Peer));
+        assert_eq!(Kind::parse(Kind::Gateway.as_str()), Some(Kind::Gateway));
+        assert_eq!(Kind::parse(Kind::Federation.as_str()), Some(Kind::Federation));
+        assert_eq!(Kind::parse("bogus"), None);
+
+        let mut log = ContactLog::open_in_memory().unwrap();
+        log.record(&ContactRecord {
+            peer: "ipn:2.0".into(), started_at: 1000,
+            direction: Direction::Outgoing, sent: 5, received: 1, ok: true,
+            kind: Kind::Peer,
+        }).unwrap();
+        log.record(&ContactRecord {
+            peer: "ipn:10.0".into(), started_at: 2000,
+            direction: Direction::Outgoing, sent: 2, received: 0, ok: true,
+            kind: Kind::Gateway,
+        }).unwrap();
+        log.record(&ContactRecord {
+            peer: "ipn:11.0".into(), started_at: 3000,
+            direction: Direction::Outgoing, sent: 1, received: 4, ok: false,
+            kind: Kind::Federation,
+        }).unwrap();
+
+        let gw = log.summary_of(Kind::Gateway).unwrap();
+        assert_eq!(gw.len(), 1);
+        assert_eq!(gw[0].peer, "ipn:10.0");
+        assert_eq!(gw[0].total_sent, 2);
+
+        let fed = log.summary_of(Kind::Federation).unwrap();
+        assert_eq!(fed.len(), 1);
+        assert_eq!(fed[0].peer, "ipn:11.0");
+        assert_eq!(fed[0].total_received, 4);
+        assert!(fed[0].unreachable());
+
+        // summary() still spans all kinds.
+        assert_eq!(log.summary().unwrap().len(), 3);
+    }
+
+    #[test]
     fn contact_log_persists_to_disk() {
         let db = tmp_db("persist");
         {
@@ -414,6 +524,7 @@ mod tests {
             log.record(&ContactRecord {
                 peer: "ipn:5.0".into(), started_at: 42,
                 direction: Direction::Outgoing, sent: 1, received: 1, ok: true,
+                kind: Kind::Peer,
             }).unwrap();
         }
         let log = ContactLog::open(&db).unwrap();
@@ -423,6 +534,46 @@ mod tests {
         assert_eq!(s[0].last_contact, 42);
         assert_eq!(s[0].total_sent, 1);
         assert_eq!(s[0].total_received, 1);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn pre_kind_database_is_migrated() {
+        // Simulate a contacts.db written by an older DTN-Link (no kind
+        // column, rows default to 'peer').
+        let db = tmp_db("migrate");
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE contacts (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   peer TEXT NOT NULL,
+                   started_at INTEGER NOT NULL,
+                   direction TEXT NOT NULL,
+                   sent INTEGER NOT NULL,
+                   received INTEGER NOT NULL,
+                   ok INTEGER NOT NULL);
+                 INSERT INTO contacts (peer, started_at, direction, sent, received, ok)
+                 VALUES ('ipn:3.0', 7, 'out', 2, 1, 1);",
+            )
+            .unwrap();
+        }
+        let log = ContactLog::open(&db).unwrap();
+        assert_eq!(log.count().unwrap(), 1, "old rows must survive the migration");
+        let s = log.summary().unwrap();
+        assert_eq!(s[0].peer, "ipn:3.0");
+        assert_eq!(s[0].total_sent, 2);
+        // The migrated row reads back as an ordinary peer contact.
+        let recs = log.contacts_since(0).unwrap();
+        assert_eq!(recs[0].kind, Kind::Peer);
+        // New records with kinds can be added after the migration.
+        let mut log = log;
+        log.record(&ContactRecord {
+            peer: "ipn:10.0".into(), started_at: 9,
+            direction: Direction::Outgoing, sent: 1, received: 0, ok: true,
+            kind: Kind::Gateway,
+        }).unwrap();
+        assert_eq!(log.summary_of(Kind::Gateway).unwrap().len(), 1);
         let _ = std::fs::remove_file(&db);
     }
 }

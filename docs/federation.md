@@ -9,8 +9,8 @@ every other DTN-Link contact.
 
 - **RegionMap** — EID membership. Each entry maps an EID URI prefix
   to a region; the longest matching prefix wins.
-- **Federation plan** — the local region plus one gateway per
-  remote region.
+- **Federation plan** — the local region, one gateway per remote
+  region, and optional per-region security policies.
 - **route_to(destination)** — explainable decision: Local (same
   region, normal store-carry-forward), ViaGateway(gateway) (a remote
   region we have a gateway for), NoRoute (unknown region, or a known
@@ -21,6 +21,16 @@ every other DTN-Link contact.
   security context) against each responsible gateway. Failures are
   isolated per gateway; remote regions with pending bundles but no
   configured gateway are reported as skipped.
+- **Per-region security policy (Phase 15)** — a plan line
+  `policy <region> require-signed` marks a region as requiring the
+  BPSec stack: `sweep` then refuses (blocks) the contact when no
+  SecurityCtx is configured instead of sending plaintext into a
+  region that forbids it. Unset regions default to `allow-plain`.
+- **sweep_logged() (Phase 15)** — the same sweep with contact
+  logging: every federation contact (success or failure, with
+  per-contact bundle counters) is recorded into a
+  dtn-diagnostics ContactLog tagged `Kind::Federation`, so
+  `dtn-link doctor` shows inter-region traffic.
 
 ## Region map (text)
 
@@ -43,7 +53,25 @@ local field
 # region  gateway-eid   gateway-addr
 hq        ipn:10.0      10.0.0.7:4556
 lab       dtn://labgw   192.168.1.5:4556
+# optional per-region security policy
+policy    hq            require-signed
 ```
+
+## CLI
+
+```text
+dtn-link federation show  <plan-file> [regions-file]
+dtn-link federation route <plan-file> <regions-file> <eid>
+dtn-link federation sweep <plan-file> <regions-file> [--insecure]
+```
+
+- `show` parses the plan (and region map) and prints the local
+  region, every gateway and its effective policy.
+- `route` answers the routing decision for one destination EID.
+- `sweep` performs a real sweep: it opens the node database
+  (`DTN_LINK_HOME`, default `.dtn-link`), loads the keyring unless
+  `--insecure` is given, and contacts every responsible gateway over
+  real TCP — recording each contact in the contact log.
 
 ## Usage
 
@@ -54,7 +82,8 @@ use dtn_core::{Node, Strategy};
 use dtn_federation::{Decision, Federation, RegionMap};
 
 let regions = RegionMap::parse("field ipn:1.\nhq ipn:9.\n")?;
-let fed = Federation::parse("local field\nhq ipn:10.0 10.0.0.7:4556\n")?
+let fed = Federation::parse(
+    "local field\nhq ipn:10.0 10.0.0.7:4556\npolicy hq require-signed\n")?
     .with_regions(regions);
 
 // Policy: what should happen to a bundle for this destination?
@@ -69,6 +98,7 @@ match fed.route_to(&Eid::ipn(9, 0)) {
 let node = Arc::new(Mutex::new(
     Node::open(1, &".dtn-link/dtn.db".into(), Strategy::Epidemic)?));
 let report = fed.sweep(&node, None);
+// report.successes / failures / skipped / blocked (policy refusals)
 ```
 
 ## Sweep semantics (honest)
@@ -83,12 +113,18 @@ let report = fed.sweep(&node, None);
 - The receiving gateway forwards with its own routing engine —
   federation is policy (which gateway for which region), not a
   topology database.
+- A `require-signed` region blocks (not fails) without a security
+  context: the bundle stays stored and the region is reported in
+  `FedSweepReport::blocked` with the reason.
 
 ## Honest scope
 
-- No per-region security policy (the SecurityCtx is node-wide).
-- No CLI command yet — library API today.
+- The security policy is enforced on the SENDING side only: a
+  require-signed region is never contacted plaintext. The receiving
+  gateway applies its own inbound policy (BPSec verify when a keyring
+  is configured).
 - Regions are prefix-based; no automatic region discovery.
+- One gateway per remote region; no multi-gateway failover yet.
 
 ## Testing
 
@@ -96,6 +132,10 @@ All federation tests run over real loopback TCP with the actual
 daemon exchange on the gateway side: a field node federates a bundle
 to an hq gateway (which then holds it for the last hop); local and
 unknown-region destinations trigger no contact at all; a dead
-gateway never blocks a live one; map and plan parsing round-trip;
-route_to covers Local / ViaGateway / NoRoute / known-region-
-no-gateway.
+gateway never blocks a live one; map, plan and policy parsing
+round-trip; route_to covers Local / ViaGateway / NoRoute /
+known-region-no-gateway; a require-signed region blocks a plaintext
+sweep (nothing crosses the wire) while allow-plain contacts
+normally; sweep_logged records the real contact outcomes with
+per-contact bundle counters into a ContactLog, filterable by
+`Kind::Federation`.

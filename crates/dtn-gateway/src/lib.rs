@@ -19,6 +19,11 @@
 //! Both run the SAME wire protocol as every other DTN-Link contact
 //! (dtn-daemon `exchange`), so a gateway is peer-compatible with any
 //! DTN-Link node, daemon or adapter — nothing is faked.
+//!
+//! Management (Phase 15): `contact_counted` reports per-contact
+//! bundle counters and can record every gateway contact (success or
+//! failure, with counters) into a dtn-diagnostics ContactLog tagged
+//! as `Kind::Gateway`, so `dtn-link doctor` shows gateway traffic.
 
 pub mod internet;
 pub mod satellite;
@@ -26,6 +31,7 @@ pub mod satellite;
 use dtn_bpv7::Eid;
 use dtn_core::Node;
 use dtn_daemon::SecurityCtx;
+use dtn_diagnostics::{ContactLog, Kind};
 use std::fmt;
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
@@ -181,6 +187,8 @@ pub struct ContactReport {
     pub peer: Eid,
     /// New bundles this node gained from the peer.
     pub inbound: usize,
+    /// Bundles this node pushed to the peer (Phase 15).
+    pub sent: usize,
 }
 
 /// Perform one full TCPCL-lite contact (the same exchange the daemon
@@ -195,18 +203,75 @@ pub fn contact(
     sec: Option<&SecurityCtx>,
     addr: &str,
 ) -> Result<ContactReport, GatewayError> {
+    contact_counted(node, sec, addr, None, Kind::Gateway)
+}
+
+/// [`contact`] with per-contact bundle counters and optional contact
+/// logging. When `log` is Some, the outcome (success or failure, with
+/// counters) is recorded into the ContactLog tagged `kind` —
+/// best-effort: a logging error never fails the contact.
+pub fn contact_counted(
+    node: &Arc<Mutex<Node>>,
+    sec: Option<&SecurityCtx>,
+    addr: &str,
+    log: Option<&Arc<Mutex<ContactLog>>>,
+    kind: Kind,
+) -> Result<ContactReport, GatewayError> {
     let before = node.lock().unwrap().store.count().unwrap_or(0);
     let mut stream =
-        TcpStream::connect(addr).map_err(|e| GatewayError::Connect(e.to_string()))?;
+        TcpStream::connect(addr).map_err(|e| {
+            record_gateway_failure(log, addr, kind);
+            GatewayError::Connect(e.to_string())
+        })?;
     let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
-    let peer = dtn_daemon::exchange(node, sec, &mut stream)
-        .map_err(|e| GatewayError::Protocol(e.to_string()))?;
+    let (peer, counts) = dtn_daemon::exchange_counted(node, sec, &mut stream)
+        .map_err(|e| {
+            record_gateway_failure(log, addr, kind);
+            GatewayError::Protocol(e.to_string())
+        })?;
     let after = node.lock().unwrap().store.count().unwrap_or(0);
+    if let Some(log) = log {
+        let rec = dtn_diagnostics::ContactRecord {
+            peer: peer.as_uri(),
+            started_at: now_unix(),
+            direction: dtn_diagnostics::Direction::Outgoing,
+            sent: counts.sent,
+            received: counts.received,
+            ok: true,
+            kind,
+        };
+        if let Err(e) = log.lock().unwrap().record(&rec) {
+            eprintln!("[gateway] contact log write failed: {e}");
+        }
+    }
     Ok(ContactReport {
         addr: addr.to_string(),
         peer,
         inbound: after.saturating_sub(before),
+        sent: counts.sent,
     })
+}
+
+/// Best-effort failure record for a gateway contact that never got
+/// far enough to learn the peer EID.
+fn record_gateway_failure(
+    log: Option<&Arc<Mutex<ContactLog>>>,
+    addr: &str,
+    kind: Kind,
+) {
+    let Some(log) = log else { return };
+    let rec = dtn_diagnostics::ContactRecord {
+        peer: addr.to_string(),
+        started_at: now_unix(),
+        direction: dtn_diagnostics::Direction::Outgoing,
+        sent: 0,
+        received: 0,
+        ok: false,
+        kind,
+    };
+    if let Err(e) = log.lock().unwrap().record(&rec) {
+        eprintln!("[gateway] contact log write failed: {e}");
+    }
 }
 
 #[cfg(test)]
@@ -255,5 +320,66 @@ mod tests {
         assert!(ContactPlan::parse("host:1 100").is_err(), "half a window");
         assert!(ContactPlan::parse("host:1 abc 200").is_err(), "non-numeric start");
         assert!(ContactPlan::parse("").unwrap().contacts.is_empty());
+    }
+
+    #[test]
+    fn counted_contact_reports_counters_and_logs() {
+        use dtn_routing::Strategy;
+        // Real loopback contact with a real contact log.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let far = Arc::new(Mutex::new(
+            Node::open(2, &PathBuf::from(":memory:"), Strategy::Epidemic).unwrap()));
+        let srv = far.clone();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let _ = dtn_daemon::exchange(&srv, None, &mut stream);
+            }
+        });
+
+        let log = Arc::new(Mutex::new(ContactLog::open_in_memory().unwrap()));
+        let local = Arc::new(Mutex::new(
+            Node::open(1, &PathBuf::from(":memory:"), Strategy::Epidemic).unwrap()));
+        local.lock().unwrap().send(Eid::ipn(2, 0), b"counted".to_vec(), 3600).unwrap();
+
+        let report = contact_counted(
+            &local, None, &format!("127.0.0.1:{}", addr.port()), Some(&log), Kind::Gateway,
+        ).unwrap();
+
+        assert_eq!(report.sent, 1, "the queued bundle must be counted as sent");
+        assert!(report.peer.as_uri().contains("ipn:2.0"));
+        assert_eq!(far.lock().unwrap().inbox().unwrap().len(), 1);
+
+        let recs = log.lock().unwrap().contacts_since(0).unwrap();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].kind, Kind::Gateway);
+        assert_eq!(recs[0].direction, dtn_diagnostics::Direction::Outgoing);
+        assert_eq!(recs[0].sent, 1);
+        assert!(recs[0].ok);
+        // Gateway-kind filtering sees it; peer-kind filtering does not.
+        assert_eq!(log.lock().unwrap().summary_of(Kind::Gateway).unwrap().len(), 1);
+        assert!(log.lock().unwrap().summary_of(Kind::Peer).unwrap().is_empty());
+    }
+
+    #[test]
+    fn failed_gateway_contact_is_logged() {
+        use dtn_routing::Strategy;
+        // Dead port: connect refuses fast; the failure must be logged.
+        let dead = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = dead.local_addr().unwrap().port();
+        drop(dead);
+
+        let log = Arc::new(Mutex::new(ContactLog::open_in_memory().unwrap()));
+        let local = Arc::new(Mutex::new(
+            Node::open(1, &PathBuf::from(":memory:"), Strategy::Epidemic).unwrap()));
+
+        let res = contact_counted(&local, None, &format!("127.0.0.1:{port}"), Some(&log), Kind::Gateway);
+        assert!(matches!(res, Err(GatewayError::Connect(_))));
+
+        let recs = log.lock().unwrap().contacts_since(0).unwrap();
+        assert_eq!(recs.len(), 1);
+        assert!(!recs[0].ok, "the failed dial must be recorded");
+        assert_eq!(recs[0].peer, format!("127.0.0.1:{port}"));
+        assert_eq!(recs[0].kind, Kind::Gateway);
     }
 }

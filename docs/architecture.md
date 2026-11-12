@@ -188,10 +188,13 @@ any bundles:
   aggregates per peer (contact count, successes, last contact,
   staleness) and flags never-succeeded peers as unreachable.
 
-CLI: `dtn-link doctor [soon-seconds]` prints the health report plus
-the per-peer contact history. See docs/diagnostics.md. Honest scope:
-per-contact bundle counters, TCPCLv4/gateway contact logging and a
-network-wide management plane are future work.
+Phase 15 update: contacts now carry per-contact bundle counters and a
+kind tag (peer / gateway / federation); the daemon, gateways and the
+federation sweep all record into the same log (counted exchange
+variants, old databases migrate in place). CLI: `dtn-link doctor
+[soon-seconds]` prints the health report plus the per-peer contact
+history. See docs/diagnostics.md. Honest scope: the log is local to
+one node — a network-wide management plane is future work.
 
 ### Federation (Phase 14 — inter-region routing)
 
@@ -204,10 +207,12 @@ to remote regions and contacts each responsible gateway with a full
 dtn-gateway contact — per-gateway failure isolation; pending
 regions without a gateway are reported as skipped. Intra-region and
 unknown-region destinations trigger no contact at all. See
-docs/federation.md. Honest scope: the receiving gateway forwards
-with its own routing engine (policy only, no topology database);
-no per-region security policy; no CLI command yet.
-
+docs/federation.md. Phase 15: per-region security policies
+(`policy <region> require-signed|allow-plain` in the plan — a
+require-signed region is never contacted without the BPSec stack)
+and the `dtn-link federation show/route/sweep` CLI commands. Honest
+scope: the receiving gateway forwards with its own routing engine
+(policy only, no topology database).
 ## Roadmap
 
 - Phases 5-6, 8 security (done): BIB integrity, BCB confidentiality, keyring trust store, secured contacts with TOFU key learning. Next: key rotation, MITM enforcement, RFC 9173 contexts, TLS (RFC 9174 §4.4).
@@ -218,4 +223,6 @@ no per-region security policy; no CLI command yet.
 - Done: Phase 12 interop + performance testing — dtn-bench (live codec/store/contact benchmarks over real transports: duplex length-prefix + KISS, loopback TCP, TCPCLv4 sessions; cross-layer interop tests including signed + encrypted bundles over KISS; docs/benchmarks.md).
 - Done: management/diagnostics layer — dtn-diagnostics (HealthReport + ContactLog, dtn-link doctor, daemon contact recording; docs/diagnostics.md).
 - Done: federation layer — dtn-federation (RegionMap, gateway plan, route_to policy, sweep over real gateway contacts; docs/federation.md).
-- Next: per-contact bundle counters, TCPCLv4/gateway/federation contact logging, a network-wide management plane, per-region security policy, a federation CLI command; later: RFC 9173 contexts, TLS (RFC 9174 §4.4), key rotation, MITM enforcement, TLE-driven pass prediction.
+- Done: Phase 15 management completion — per-contact bundle counters (exchange_counted / exchange_v4_counted), kind-tagged contact log (peer/gateway/federation) with in-place migration of older databases, gateway + federation contact logging, per-region security policies (require-signed blocks plaintext sweeps) and the dtn-link federation show/route/sweep CLI.
+- Next: a network-wide management plane; later: RFC 9173 contexts, TLS (RFC 9174 §4.4), key rotation, MITM enforcement, TLE-driven pass prediction.
+

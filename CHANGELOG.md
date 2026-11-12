@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.14.0 (2026-11-12)
+
+Phase 15 — management completion: real per-contact bundle counters,
+kind-tagged contact logging across daemon / gateway / federation,
+per-region security policies and the federation CLI.
+
+- dtn-diagnostics: ContactRecord gains per-contact bundle counters
+  (sent / received, filled by the new counted exchange variants) and
+  a kind tag — Kind::Peer / Gateway / Federation with as_str/parse
+  round-trip. ContactLog::open migrates older databases in place
+  (ALTER TABLE + 'peer' backfill; existing rows survive, tested
+  against a simulated pre-kind schema). New summary_of(kind)
+  aggregates per contact kind; summary() still spans all kinds.
+- dtn-daemon: exchange_counted / exchange_v4_counted return
+  ContactCounts (bundles pushed, bundles newly stored — duplicates
+  and rejected forgeries are not counted); exchange / exchange_v4
+  remain the compatibility wrappers. The daemon's serve and sync
+  loops now record sent/received counters into the contact log;
+  exchange_v4_logged logs TCPCLv4 sessions as kind=peer.
+- dtn-gateway: ContactReport gains `sent`; new contact_counted
+  performs the full gateway contact and records the outcome (success
+  with counters, or failure with the dial address) into the contact
+  log tagged Kind::Gateway. contact() delegates unchanged.
+- dtn-federation: per-region security policy — plan lines
+  `policy <region> require-signed|allow-plain` (parse/to_text
+  round-trip, duplicate-policy rejection, policy_of lookup defaulting
+  to allow-plain). A require-signed region is never contacted
+  without a SecurityCtx: the sweep reports it in the new
+  FedSweepReport::blocked (with reason) and nothing crosses the
+  wire; allow-plain regions contact normally. sweep_logged records
+  every federation contact (success with counters, failure with the
+  dial address) tagged Kind::Federation; sweep delegates unchanged.
+- cli: new `dtn-link federation show|route|sweep` commands (plan +
+  region-map parsing, routing decisions, real sweeps against the
+  local node database with keyring security unless --insecure);
+  usage text and version string updated (0.14.0).
+- docs: federation guide (policies + CLI), diagnostics guide
+  (counters, kinds, migration), architecture roadmap Phase 15 done.
+
+
 ## 0.13.0 (2026-11-11)
 
 Phase 14 — federation + Bluetooth RFCOMM glue.
@@ -318,3 +358,4 @@ Phases 2-4 — multi-hop forwarding, hybrid routing, TCP transport.
 
 Phase 1 — Rust core foundation (BPv7 CBOR, identity, SQLite store, node
 engine, CLI, CI).
+

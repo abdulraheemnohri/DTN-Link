@@ -15,13 +15,14 @@
 //! Unsigned bundles and bundles from unknown sources are accepted
 //! (logged); multiple-BIB malformed bundles are dropped.
 //!
-//! Management (this phase): when `DaemonConfig::contact_log` is set,
+//! Management (Phase 15): when `DaemonConfig::contact_log` is set,
 //! every accepted (TCPCL-lite) connection and every sync attempt is
 //! recorded into a dtn-diagnostics ContactLog — peer EID (or address
-//! on failure), direction, outcome and timestamp — for
-//! `dtn-link doctor` to report. Honest scope: per-contact bundle
-//! counters are not recorded yet (exchange() returns no counts) and
-//! TCPCLv4 sessions are not logged yet.
+//! on failure), direction, outcome, per-contact bundle counters and
+//! timestamp — for `dtn-link doctor` to report. The counted variants
+//! (`exchange_counted`, `exchange_v4_counted`) return how many
+//! bundles were sent and newly stored per contact; `exchange` and
+//! `exchange_v4` remain the uncounted wrappers.
 //!
 //! Honest scope: key rotation, signed key-change and TLS (RFC 9174
 //! §4.4) remain future work. A mismatch between a learned hello key
@@ -30,7 +31,7 @@
 
 use dtn_bpv7::{Bundle, Eid};
 use dtn_core::Node;
-use dtn_diagnostics::{ContactLog, ContactRecord, Direction};
+use dtn_diagnostics::{ContactLog, ContactRecord, Direction, Kind};
 use dtn_keyring::{Keyring, KeyringVerifyOutcome};
 use dtn_routing::Strategy;
 use dtn_tcpcl::v4::{Event, Session, SessionError, TERM_OTHER};
@@ -61,21 +62,34 @@ pub struct SecurityCtx {
     pub sign_outbound: bool,
 }
 
+/// Per-contact bundle counters, straight from the exchange loop.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ContactCounts {
+    /// Bundles this node pushed to the peer.
+    pub sent: usize,
+    /// Bundles the peer pushed that this node newly stored
+    /// (duplicates and rejects are not counted).
+    pub received: usize,
+}
+
 /// Best-effort contact-log write; logging must never break a contact.
 fn log_contact(
     log: &Option<Arc<Mutex<ContactLog>>>,
     peer: &str,
     direction: Direction,
     ok: bool,
+    counts: ContactCounts,
+    kind: Kind,
 ) {
     let Some(log) = log else { return };
     let rec = ContactRecord {
         peer: peer.to_string(),
         started_at: dtn_storage::now(),
         direction,
-        sent: 0,
-        received: 0,
+        sent: counts.sent,
+        received: counts.received,
         ok,
+        kind,
     };
     if let Err(e) = log.lock().unwrap().record(&rec) {
         eprintln!("[daemon] contact log write failed: {e}");
@@ -152,14 +166,15 @@ fn outbound_wire(node: &Arc<Mutex<Node>>, sec: Option<&SecurityCtx>, bundle: &Bu
     }
 }
 
-/// Exchange bundles with a connected peer stream (TCPCL-lite).
+/// Exchange bundles with a connected peer stream (TCPCL-lite),
+/// reporting how many bundles were sent and newly stored.
 /// When security is enabled, hello = [EID frame][32-byte pubkey frame]
 /// and keys are TOFU-learned into the keyring.
-pub fn exchange(
+pub fn exchange_counted(
     node: &Arc<Mutex<Node>>,
     sec: Option<&SecurityCtx>,
     stream: &mut TcpStream,
-) -> Result<Eid, FrameError> {
+) -> Result<(Eid, ContactCounts), FrameError> {
     let our_eid = node.lock().unwrap().eid();
     write_frame(stream, our_eid.as_uri().as_bytes())?;
     if let Some(sec) = sec {
@@ -194,30 +209,47 @@ pub fn exchange(
     write_end_of_batch(stream)?;
     stream.flush()?;
 
+    let mut counts = ContactCounts {
+        sent: outbound.len(),
+        received: 0,
+    };
     loop {
         match read_frame(stream) {
             Ok(bytes) => {
-                let _ = secured_receive(node, sec, &bytes);
+                if secured_receive(node, sec, &bytes)?.is_some() {
+                    counts.received += 1;
+                }
             }
             Err(FrameError::Closed) => break,
             Err(e) => return Err(e),
         }
     }
-    Ok(peer)
+    Ok((peer, counts))
+}
+
+/// Exchange bundles with a connected peer stream (TCPCL-lite).
+/// Compatibility wrapper around [`exchange_counted`].
+pub fn exchange(
+    node: &Arc<Mutex<Node>>,
+    sec: Option<&SecurityCtx>,
+    stream: &mut TcpStream,
+) -> Result<Eid, FrameError> {
+    exchange_counted(node, sec, stream).map(|(peer, _)| peer)
 }
 
 /// Exchange bundles with a peer over a full RFC 9174 TCPCLv4 session:
 /// contact handshake, acknowledged outbound transfers, inbound bundles
 /// stored through the node engine, then clean SESS_TERM shutdown.
+/// Returns the peer EID URI and per-contact bundle counters.
 /// Security: bundles are signed/verified when a SecurityCtx is given,
 /// but the v4 session EID carries no pubkey — key learning is
 /// TCPCL-lite only (honest limitation).
-pub fn exchange_v4(
+pub fn exchange_v4_counted(
     node: &Arc<Mutex<Node>>,
     sec: Option<&SecurityCtx>,
     stream: TcpStream,
     active: bool,
-) -> Result<String, SessionError> {
+) -> Result<(String, ContactCounts), SessionError> {
     let local_eid = node.lock().unwrap().eid();
     let local_uri = local_eid.as_uri();
     let mut sess = Session::new(stream, &local_uri, 30);
@@ -229,12 +261,19 @@ pub fn exchange_v4(
         let mut n = node.lock().unwrap();
         n.select_outbound(&peer).unwrap_or_default()
     };
+    let mut counts = ContactCounts {
+        sent: 0,
+        received: 0,
+    };
     for ob in &outbound {
         let tid = sess.send_bundle(&outbound_wire(node, sec, &ob.bundle))?;
+        counts.sent += 1;
         loop {
             match sess.pump()? {
                 Some(Event::Bundle(bytes)) => {
-                    let _ = secured_receive(node, sec, &bytes);
+                    if secured_receive(node, sec, &bytes)?.is_some() {
+                        counts.received += 1;
+                    }
                 }
                 Some(Event::Acked { transfer_id, .. }) if transfer_id == tid => break,
                 Some(Event::Terminated { .. }) => break,
@@ -248,7 +287,9 @@ pub fn exchange_v4(
     loop {
         match sess.pump() {
             Ok(Some(Event::Bundle(bytes))) => {
-                let _ = secured_receive(node, sec, &bytes);
+                if secured_receive(node, sec, &bytes)?.is_some() {
+                    counts.received += 1;
+                }
             }
             Ok(Some(Event::Terminated { .. })) => break,
             Ok(_) => {}
@@ -256,7 +297,43 @@ pub fn exchange_v4(
             Err(e) => return Err(e),
         }
     }
-    Ok(peer_eid)
+    Ok((peer_eid, counts))
+}
+
+/// Exchange bundles over TCPCLv4 with optional contact logging
+/// (kind Peer). Logging is best-effort and never fails the session.
+pub fn exchange_v4_logged(
+    node: &Arc<Mutex<Node>>,
+    sec: Option<&SecurityCtx>,
+    stream: TcpStream,
+    active: bool,
+    log: Option<&Arc<Mutex<ContactLog>>>,
+) -> Result<String, SessionError> {
+    let res = exchange_v4_counted(node, sec, stream, active);
+    if let Some(log) = log {
+        let log_opt = Some(log.clone());
+        let direction = if active { Direction::Outgoing } else { Direction::Incoming };
+        match &res {
+            Ok((peer_eid, counts)) => {
+                log_contact(&log_opt, peer_eid, direction, true, *counts, Kind::Peer);
+            }
+            Err(_) => {
+                log_contact(&log_opt, "unknown", direction, false, ContactCounts::default(), Kind::Peer);
+            }
+        }
+    }
+    res.map(|(peer_eid, _)| peer_eid)
+}
+
+/// Exchange bundles with a peer over a full RFC 9174 TCPCLv4 session.
+/// Compatibility wrapper around [`exchange_v4_counted`].
+pub fn exchange_v4(
+    node: &Arc<Mutex<Node>>,
+    sec: Option<&SecurityCtx>,
+    stream: TcpStream,
+    active: bool,
+) -> Result<String, SessionError> {
+    exchange_v4_counted(node, sec, stream, active).map(|(peer_eid, _)| peer_eid)
 }
 
 fn serve(
@@ -272,11 +349,13 @@ fn serve(
         let log = log.clone();
         std::thread::spawn(move || {
             let res = sec.as_ref().map(|s| s.as_ref());
-            match exchange(&node, res, &mut stream) {
-                Ok(peer) => log_contact(&log, &peer.as_uri(), Direction::Incoming, true),
+            match exchange_counted(&node, res, &mut stream) {
+                Ok((peer, counts)) => {
+                    log_contact(&log, &peer.as_uri(), Direction::Incoming, true, counts, Kind::Peer)
+                }
                 Err(e) => {
                     eprintln!("[daemon] contact failed: {e}");
-                    log_contact(&log, "unknown", Direction::Incoming, false);
+                    log_contact(&log, "unknown", Direction::Incoming, false, ContactCounts::default(), Kind::Peer);
                 }
             }
         });
@@ -295,15 +374,17 @@ fn sync_peers(
             if let Ok(mut stream) = TcpStream::connect(addr) {
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
                 let res = sec.as_ref().map(|s| s.as_ref());
-                match exchange(&node, res, &mut stream) {
-                    Ok(peer) => log_contact(&log, &peer.as_uri(), Direction::Outgoing, true),
+                match exchange_counted(&node, res, &mut stream) {
+                    Ok((peer, counts)) => {
+                        log_contact(&log, &peer.as_uri(), Direction::Outgoing, true, counts, Kind::Peer)
+                    }
                     Err(e) => {
                         eprintln!("[daemon] sync with {addr} failed: {e}");
-                        log_contact(&log, addr, Direction::Outgoing, false);
+                        log_contact(&log, addr, Direction::Outgoing, false, ContactCounts::default(), Kind::Peer);
                     }
                 }
             } else {
-                log_contact(&log, addr, Direction::Outgoing, false);
+                log_contact(&log, addr, Direction::Outgoing, false, ContactCounts::default(), Kind::Peer);
             }
         }
         std::thread::sleep(interval);
@@ -388,14 +469,16 @@ mod tests {
     #[test]
     fn contact_logging_records_outcomes() {
         let log = Some(Arc::new(Mutex::new(ContactLog::open_in_memory().unwrap())));
-        log_contact(&log, "ipn:7.0", Direction::Incoming, true);
-        log_contact(&log, "127.0.0.1:4556", Direction::Outgoing, false);
+        log_contact(&log, "ipn:7.0", Direction::Incoming, true, ContactCounts { sent: 2, received: 1 }, Kind::Peer);
+        log_contact(&log, "127.0.0.1:4556", Direction::Outgoing, false, ContactCounts::default(), Kind::Peer);
         let l = log.as_ref().unwrap().lock().unwrap();
         assert_eq!(l.count().unwrap(), 2);
         let peers = l.summary().unwrap();
         assert_eq!(peers.len(), 2);
         let ok_peer = peers.iter().find(|p| p.peer == "ipn:7.0").unwrap();
         assert_eq!(ok_peer.successful, 1);
+        assert_eq!(ok_peer.total_sent, 2);
+        assert_eq!(ok_peer.total_received, 1);
         assert!(ok_peer.ever_succeeded());
         let failed = peers.iter().find(|p| p.peer == "127.0.0.1:4556").unwrap();
         assert!(failed.unreachable());
@@ -404,7 +487,7 @@ mod tests {
     #[test]
     fn contact_logging_none_is_a_noop() {
         let log: Option<Arc<Mutex<ContactLog>>> = None;
-        log_contact(&log, "ipn:7.0", Direction::Incoming, true);
+        log_contact(&log, "ipn:7.0", Direction::Incoming, true, ContactCounts::default(), Kind::Peer);
     }
 
     #[test]
@@ -433,6 +516,70 @@ mod tests {
         let delivered = rx.recv_timeout(Duration::from_secs(10)).unwrap();
         assert_eq!(delivered, 1, "bundle must be delivered over TCP");
         server.join().unwrap();
+    }
+
+    #[test]
+    fn counted_contact_reports_bundle_counters() {
+        // One bundle each way over one contact; both sides must report
+        // sent=1 / received=1 from the real exchange loop.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = std::thread::spawn(move || {
+            let node = Arc::new(Mutex::new(
+                Node::open(2, &PathBuf::from(":memory:"), Strategy::Epidemic).unwrap()));
+            node.lock().unwrap().send(Eid::ipn(1, 0), b"reply payload".to_vec(), 3600).unwrap();
+            let (mut stream, _) = listener.accept().unwrap();
+            exchange_counted(&node, None, &mut stream).unwrap()
+        });
+
+        let client_node = Arc::new(Mutex::new(
+            Node::open(1, &PathBuf::from(":memory:"), Strategy::Epidemic).unwrap()));
+        client_node.lock().unwrap().send(Eid::ipn(2, 0), b"request payload".to_vec(), 3600).unwrap();
+
+        let mut stream = TcpStream::connect(addr).unwrap();
+        let (peer, counts) = exchange_counted(&client_node, None, &mut stream).unwrap();
+        assert!(peer.as_uri().contains("ipn:2.0"), "peer EID comes from the hello");
+        assert_eq!(counts.sent, 1, "the one queued bundle must be counted as sent");
+        assert_eq!(counts.received, 1, "the server's bundle must be counted as received");
+
+        let (_, server_counts) = server.join().unwrap();
+        assert_eq!(server_counts.sent, 1);
+        assert_eq!(server_counts.received, 1);
+    }
+
+    #[test]
+    fn counted_contact_logs_to_diagnostics() {
+        // A real contact with a real log: the record must carry the
+        // bundle counters and the Peer kind.
+        let log = Arc::new(Mutex::new(ContactLog::open_in_memory().unwrap()));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = std::thread::spawn(move || {
+            let node = Arc::new(Mutex::new(
+                Node::open(2, &PathBuf::from(":memory:"), Strategy::Epidemic).unwrap()));
+            let (mut stream, _) = listener.accept().unwrap();
+            exchange_counted(&node, None, &mut stream).unwrap()
+        });
+
+        let client_node = Arc::new(Mutex::new(
+            Node::open(1, &PathBuf::from(":memory:"), Strategy::Epidemic).unwrap()));
+        client_node.lock().unwrap().send(Eid::ipn(2, 0), b"logged bundle".to_vec(), 3600).unwrap();
+
+        let mut stream = TcpStream::connect(addr).unwrap();
+        let (peer, counts) = exchange_counted(&client_node, None, &mut stream).unwrap();
+        let log_ref = Some(log.clone());
+        log_contact(&log_ref, &peer.as_uri(), Direction::Outgoing, true, counts, Kind::Peer);
+        server.join().unwrap();
+
+        let recs = log.lock().unwrap().contacts_since(0).unwrap();
+        assert_eq!(recs.len(), 1);
+        assert!(recs[0].peer.contains("ipn:2.0"));
+        assert_eq!(recs[0].sent, 1);
+        assert_eq!(recs[0].received, 1);
+        assert_eq!(recs[0].kind, Kind::Peer);
+        assert!(recs[0].ok);
     }
 
     #[test]
@@ -532,6 +679,55 @@ mod tests {
         server.join().unwrap();
         assert_eq!(node_a.lock().unwrap().inbox().unwrap().len(), 1,
             "B's bundle must reach A over TCPCLv4");
+    }
+
+    #[test]
+    fn tcpclv4_counted_session_reports_counters_and_logs() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let log = Arc::new(Mutex::new(ContactLog::open_in_memory().unwrap()));
+
+        let server = std::thread::spawn(move || {
+            let node = Arc::new(Mutex::new(
+                Node::open(2, &PathBuf::from(":memory:"), Strategy::Epidemic).unwrap()));
+            node.lock().unwrap().send(Eid::ipn(1, 0), b"v4 reply".to_vec(), 3600).unwrap();
+            let (stream, _) = listener.accept().unwrap();
+            exchange_v4_counted(&node, None, stream, false).unwrap()
+        });
+
+        let node_a = Arc::new(Mutex::new(
+            Node::open(1, &PathBuf::from(":memory:"), Strategy::Epidemic).unwrap()));
+        node_a.lock().unwrap().send(Eid::ipn(2, 0), b"v4 request".to_vec(), 3600).unwrap();
+        let stream = TcpStream::connect(addr).unwrap();
+        let (peer_eid, counts) = exchange_v4_counted(&node_a, None, stream, true).unwrap();
+        assert_eq!(counts.sent, 1);
+        assert_eq!(counts.received, 1, "the server's reply must be counted");
+
+        let (_, server_counts) = server.join().unwrap();
+        assert_eq!(server_counts.sent, 1);
+        assert_eq!(server_counts.received, 1);
+
+        // The logged variant records the same session into the log.
+        let listener2 = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr2 = listener2.local_addr().unwrap();
+        let srv = std::thread::spawn(move || {
+            let node = Arc::new(Mutex::new(
+                Node::open(2, &PathBuf::from(":memory:"), Strategy::Epidemic).unwrap()));
+            let (stream, _) = listener2.accept().unwrap();
+            exchange_v4(&node, None, stream, false).unwrap();
+        });
+        node_a.lock().unwrap().send(Eid::ipn(2, 0), b"v4 logged".to_vec(), 3600).unwrap();
+        let stream = TcpStream::connect(addr2).unwrap();
+        let logged = Some(log.clone());
+        exchange_v4_logged(&node_a, None, stream, true, logged.as_ref()).unwrap();
+        srv.join().unwrap();
+
+        let recs = log.lock().unwrap().contacts_since(0).unwrap();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].peer, peer_eid);
+        assert_eq!(recs[0].direction, Direction::Outgoing);
+        assert_eq!(recs[0].sent, 1);
+        assert_eq!(recs[0].kind, Kind::Peer);
     }
 
     // ---- Phase 8 security tests ----

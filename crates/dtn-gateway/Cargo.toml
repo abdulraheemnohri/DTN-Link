@@ -9,6 +9,7 @@ description = "Internet and satellite gateways (contact plans, pass windows) for
 dtn-bpv7.workspace = true
 dtn-core.workspace = true
 dtn-daemon.workspace = true
+dtn-diagnostics.workspace = true
 
 [dev-dependencies]
 dtn-routing.workspace = true

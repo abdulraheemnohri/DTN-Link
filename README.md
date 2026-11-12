@@ -9,7 +9,7 @@ without requiring a SIM card, cellular subscription or Wi-Fi router for every
 communication. It uses Bundle Protocol v7 (RFC 9171), store-carry-forward
 routing, modular physical transport adapters and optional internet gateways.
 
-## Status: Phases 1-12 + management layer (core, transports, security, adapters, gateways, diagnostics)
+## Status: Phases 1-12 + management + federation layers (core, transports, security, adapters, gateways, diagnostics, federation)
 
 | Component | Status |
 |---|---|
@@ -30,12 +30,12 @@ routing, modular physical transport adapters and optional internet gateways.
 | Serial-port hardware glue (cargo feature "serial") | implemented, feature-gated |
 | Internet & satellite gateways (contact plans, pass windows) | implemented + tested (crates/dtn-gateway) |
 | Interop + performance benchmark suite | implemented + tested (crates/dtn-bench) |
-| Diagnostics: health reports + contact history (`dtn-link doctor`) | implemented + tested (crates/dtn-diagnostics) |
-| CLI | implemented — init/status/send/receive/bundles/forward/daemon/doctor/verify/keyring/encrypt/decrypt/decode |
+| Diagnostics: health reports + kind-tagged contact history with per-contact bundle counters (`dtn-link doctor`) | implemented + tested (crates/dtn-diagnostics) |
+| CLI | implemented — init/status/send/receive/bundles/forward/daemon/doctor/verify/keyring/encrypt/decrypt/decode/federation |
 | RFC 9173 context identifiers; signed key rotation | future |
 | Bluetooth RFCOMM platform glue (stream layer ready) | next phase |
 | Android / iOS / Windows / Linux apps | Phases 7-9 |
-| Federation (network-of-networks) | future |
+| Federation: region map, gateway plans, per-region security policy, sweeps over real gateway contacts, `dtn-link federation` CLI | implemented + tested (crates/dtn-federation) |
 
 ## Build
 
@@ -77,3 +77,4 @@ See [docs/architecture.md](docs/architecture.md),
 ## License
 
 MIT
+

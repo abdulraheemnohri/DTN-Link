@@ -14,15 +14,27 @@
 //! the daemon and every adapter use. A gateway is an ordinary
 //! DTN-Link listener; nothing is faked.
 //!
+//! Security policy (Phase 15): a plan may mark a region
+//! `require-signed`, meaning bundles must cross its gateway with the
+//! BPSec security stack enabled. A sweep without a SecurityCtx then
+//! refuses the contact and reports the region as blocked instead of
+//! silently sending plaintext into a region that forbids it.
+//!
+//! Management (Phase 15): `sweep_logged` records every federation
+//! contact — success or failure, with per-contact bundle counters —
+//! into a dtn-diagnostics ContactLog tagged `Kind::Federation`, so
+//! `dtn-link doctor` shows inter-region traffic.
+//!
 //! Honest scope: federation is routing policy, not a topology
 //! database — the receiving gateway forwards with its own routing
-//! engine; there is no per-region security policy and no CLI
-//! command yet.
+//! engine. Regions are prefix-based; there is no automatic region
+//! discovery.
 
 use dtn_bpv7::{Bundle, Eid};
 use dtn_core::{Node, NodeError};
 use dtn_daemon::SecurityCtx;
-use dtn_gateway::{contact, ContactReport, GatewayError};
+use dtn_diagnostics::{ContactLog, Kind};
+use dtn_gateway::{contact_counted, ContactReport, GatewayError};
 use std::sync::{Arc, Mutex};
 
 /// EID -> region membership by URI prefix.
@@ -116,6 +128,34 @@ pub struct Gateway {
     pub addr: String,
 }
 
+/// Per-region security policy for outgoing federation traffic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegionPolicy {
+    /// Any contact may carry this region's traffic (default).
+    AllowPlain,
+    /// Bundles may only cross this region's gateway with the BPSec
+    /// stack enabled (signed outbound + verified inbound). A sweep
+    /// without a SecurityCtx blocks the region instead of sending
+    /// plaintext.
+    RequireSigned,
+}
+
+impl RegionPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RegionPolicy::AllowPlain => "allow-plain",
+            RegionPolicy::RequireSigned => "require-signed",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "allow-plain" => Some(RegionPolicy::AllowPlain),
+            "require-signed" => Some(RegionPolicy::RequireSigned),
+            _ => None,
+        }
+    }
+}
+
 /// The local region plus the gateway peers for remote regions.
 ///
 /// Text plan format (blank lines and # comments are ignored):
@@ -125,6 +165,8 @@ pub struct Gateway {
 ///     # region  gateway-eid   gateway-addr
 ///     hq        ipn:10.0      10.0.0.7:4556
 ///     lab       dtn://labgw   192.168.1.5:4556
+///     # optional per-region security policy
+///     policy    hq            require-signed
 #[derive(Debug, Clone)]
 pub struct Federation {
     /// The region this node belongs to.
@@ -133,6 +175,8 @@ pub struct Federation {
     pub regions: RegionMap,
     /// One gateway per remote region.
     pub gateways: Vec<Gateway>,
+    /// Per-region security policies (default AllowPlain).
+    pub policies: Vec<(String, RegionPolicy)>,
 }
 
 /// Explainable routing decision for one destination.
@@ -147,8 +191,8 @@ pub enum Decision {
     NoRoute,
 }
 
-/// Result of one federation sweep: per-region successes, failures
-/// and skipped (pending but gateway-less) regions.
+/// Result of one federation sweep: per-region successes, failures,
+/// skipped (pending but gateway-less) and policy-blocked regions.
 #[derive(Debug, Default)]
 pub struct FedSweepReport {
     /// (region, contact report) for every contacted gateway.
@@ -159,6 +203,9 @@ pub struct FedSweepReport {
     /// Remote regions that have pending bundles but no configured
     /// gateway.
     pub skipped: Vec<String>,
+    /// (region, reason) for regions whose security policy forbade
+    /// the contact under the given security context.
+    pub blocked: Vec<(String, String)>,
 }
 
 impl Federation {
@@ -168,6 +215,7 @@ impl Federation {
     pub fn parse(text: &str) -> Result<Federation, String> {
         let mut local: Option<String> = None;
         let mut gateways = Vec::new();
+        let mut policies = Vec::new();
         for (i, raw) in text.lines().enumerate() {
             let line = raw.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -181,6 +229,28 @@ impl Federation {
                     return Err(format!("line {}: 'local' needs a region name", i + 1));
                 }
                 local = Some(region);
+            } else if first == "policy" {
+                let region = parts.next().unwrap_or_default().to_string();
+                let pol_s = parts.next().unwrap_or_default().to_string();
+                if region.is_empty() || pol_s.is_empty() {
+                    return Err(format!(
+                        "line {}: expected 'policy <region> <allow-plain|require-signed>'",
+                        i + 1
+                    ));
+                }
+                let policy = RegionPolicy::parse(&pol_s).ok_or_else(|| {
+                    format!(
+                        "line {}: unknown policy '{pol_s}' (expected allow-plain or require-signed)",
+                        i + 1
+                    )
+                })?;
+                if parts.next().is_some() {
+                    return Err(format!("line {}: unexpected extra field", i + 1));
+                }
+                if policies.iter().any(|(r, _)| r == &region) {
+                    return Err(format!("line {}: duplicate policy for region '{region}'", i + 1));
+                }
+                policies.push((region, policy));
             } else {
                 let region = first.to_string();
                 let eid_s = parts.next().unwrap_or_default().to_string();
@@ -200,6 +270,7 @@ impl Federation {
             local_region,
             regions: RegionMap::new(),
             gateways,
+            policies,
         })
     }
 
@@ -209,6 +280,9 @@ impl Federation {
         out.push_str(&format!("local {}\n", self.local_region));
         for g in &self.gateways {
             out.push_str(&format!("{} {} {}\n", g.region, g.eid.as_uri(), g.addr));
+        }
+        for (region, policy) in &self.policies {
+            out.push_str(&format!("policy {region} {}\n", policy.as_str()));
         }
         out
     }
@@ -222,6 +296,15 @@ impl Federation {
     pub fn with_regions(mut self, regions: RegionMap) -> Self {
         self.regions = regions;
         self
+    }
+
+    /// The security policy for a region (AllowPlain when unset).
+    pub fn policy_of(&self, region: &str) -> RegionPolicy {
+        self.policies
+            .iter()
+            .find(|(r, _)| r == region)
+            .map(|(_, p)| *p)
+            .unwrap_or(RegionPolicy::AllowPlain)
     }
 
     /// Explainable routing decision for one destination.
@@ -262,6 +345,19 @@ impl Federation {
     /// security stack the daemon uses), so the receiving gateway is
     /// an ordinary DTN-Link listener.
     pub fn sweep(&self, node: &Arc<Mutex<Node>>, sec: Option<&SecurityCtx>) -> FedSweepReport {
+        self.sweep_logged(node, sec, None)
+    }
+
+    /// [`sweep`] with contact logging: every federation contact —
+    /// success or failure, with per-contact bundle counters — is
+    /// recorded into the ContactLog tagged `Kind::Federation`
+    /// (best-effort; a logging error never fails a contact).
+    pub fn sweep_logged(
+        &self,
+        node: &Arc<Mutex<Node>>,
+        sec: Option<&SecurityCtx>,
+        log: Option<&Arc<Mutex<ContactLog>>>,
+    ) -> FedSweepReport {
         let pending = {
             let n = node.lock().unwrap();
             self.pending_regions(&n).unwrap_or_default()
@@ -271,7 +367,20 @@ impl Federation {
             if !pending.iter().any(|r| r == &g.region) {
                 continue;
             }
-            match contact(node, sec, &g.addr) {
+            // Per-region security policy: a require-signed region is
+            // never contacted without the BPSec stack.
+            if self.policy_of(&g.region) == RegionPolicy::RequireSigned && sec.is_none() {
+                eprintln!(
+                    "[federation] region {} requires signed contacts; refusing plaintext sweep",
+                    g.region
+                );
+                report.blocked.push((
+                    g.region.clone(),
+                    "region policy require-signed but no security context configured".into(),
+                ));
+                continue;
+            }
+            match contact_counted(node, sec, &g.addr, log, Kind::Federation) {
                 Ok(r) => report.successes.push((g.region.clone(), r)),
                 Err(e) => {
                     eprintln!(
@@ -397,11 +506,13 @@ mod tests {
                 },
             ]
         );
+        assert!(fed.policies.is_empty(), "no policy lines means no policies");
 
         // Roundtrip through to_text preserves the plan.
         let again = Federation::parse(&fed.to_text()).unwrap();
         assert_eq!(again.local_region, fed.local_region);
         assert_eq!(again.gateways, fed.gateways);
+        assert_eq!(again.policies, fed.policies);
     }
 
     #[test]
@@ -412,6 +523,35 @@ mod tests {
         assert!(
             Federation::parse("local field\nhq ipn:x.0 10.0.0.7:4556").is_err(),
             "bad ipn EID"
+        );
+    }
+
+    #[test]
+    fn region_policy_parse_roundtrip_and_lookup() {
+        let text = "local field\n\
+                    hq ipn:10.0 10.0.0.7:4556\n\
+                    lab dtn://labgw 192.168.1.5:4556\n\
+                    policy hq require-signed\n\
+                    policy lab allow-plain\n";
+        let fed = Federation::parse(text).unwrap();
+        assert_eq!(fed.policy_of("hq"), RegionPolicy::RequireSigned);
+        assert_eq!(fed.policy_of("lab"), RegionPolicy::AllowPlain);
+        assert_eq!(fed.policy_of("unknown"), RegionPolicy::AllowPlain, "unset means allow-plain");
+
+        // Roundtrip through to_text preserves the policies.
+        let again = Federation::parse(&fed.to_text()).unwrap();
+        assert_eq!(again.policies, fed.policies);
+
+        // Parse errors.
+        assert!(Federation::parse("local f\npolicy hq").is_err(), "policy without mode");
+        assert!(Federation::parse("local f\npolicy hq encrypted").is_err(), "unknown mode");
+        assert!(
+            Federation::parse("local f\npolicy hq require-signed extra").is_err(),
+            "extra field"
+        );
+        assert!(
+            Federation::parse("local f\npolicy hq require-signed\npolicy hq allow-plain").is_err(),
+            "duplicate policy"
         );
     }
 
@@ -462,6 +602,7 @@ mod tests {
         assert_eq!(report.successes[0].0, "hq");
         assert!(report.failures.is_empty());
         assert!(report.skipped.is_empty());
+        assert!(report.blocked.is_empty());
 
         // The gateway node now carries the bundle and its own routing
         // would forward it to the hq destination on the next hop.
@@ -551,5 +692,107 @@ mod tests {
         let mut g = lab_node.lock().unwrap();
         let outbound = g.select_outbound(&Eid::ipn(7, 0)).unwrap();
         assert_eq!(outbound.len(), 1, "lab gateway must hold the bundle");
+    }
+
+    #[test]
+    fn require_signed_policy_blocks_plain_sweep() {
+        let mut fed = test_federation();
+        let (gateway_node, addr) = one_shot_listener(10);
+        fed.policies = vec![("hq".into(), RegionPolicy::RequireSigned)];
+        fed.gateways = vec![Gateway {
+            region: "hq".into(),
+            eid: Eid::ipn(10, 0),
+            addr: format!("127.0.0.1:{}", addr.port()),
+        }];
+
+        let island = mem_node(1);
+        island
+            .lock()
+            .unwrap()
+            .send(Eid::ipn(9, 0), b"must not ride plaintext".to_vec(), 3600)
+            .unwrap();
+
+        // No security context: the region is blocked, NOT contacted.
+        let report = fed.sweep(&island, None);
+        assert!(report.successes.is_empty(), "a require-signed region must not be contacted without security");
+        assert!(report.failures.is_empty(), "blocking is a policy decision, not a failure");
+        assert_eq!(report.blocked.len(), 1);
+        assert_eq!(report.blocked[0].0, "hq");
+        assert!(report.blocked[0].1.contains("require-signed"));
+
+        // The one-shot gateway listener must still be unconsumed.
+        assert_eq!(
+            gateway_node.lock().unwrap().store.count().unwrap(),
+            0,
+            "no bundle may cross a blocked contact"
+        );
+    }
+
+    #[test]
+    fn allow_plain_policy_still_contacts_without_security() {
+        let mut fed = test_federation();
+        let (gateway_node, addr) = one_shot_listener(10);
+        fed.policies = vec![("hq".into(), RegionPolicy::AllowPlain)];
+        fed.gateways = vec![Gateway {
+            region: "hq".into(),
+            eid: Eid::ipn(10, 0),
+            addr: format!("127.0.0.1:{}", addr.port()),
+        }];
+
+        let island = mem_node(1);
+        island
+            .lock()
+            .unwrap()
+            .send(Eid::ipn(9, 0), b"plain is fine here".to_vec(), 3600)
+            .unwrap();
+
+        let report = fed.sweep(&island, None);
+        assert_eq!(report.successes.len(), 1, "allow-plain regions contact normally");
+        assert!(report.blocked.is_empty());
+        assert_eq!(gateway_node.lock().unwrap().store.count().unwrap(), 1);
+    }
+
+    #[test]
+    fn sweep_logged_records_federation_contacts() {
+        let mut fed = test_federation();
+        let (gateway_node, addr) = one_shot_listener(10);
+        fed.gateways = vec![Gateway {
+            region: "hq".into(),
+            eid: Eid::ipn(10, 0),
+            addr: format!("127.0.0.1:{}", addr.port()),
+        }];
+        let dead = dead_addr();
+        fed.gateways.push(Gateway {
+            region: "lab".into(),
+            eid: Eid::ipn(11, 0),
+            addr: dead.clone(),
+        });
+
+        let island = mem_node(1);
+        island.lock().unwrap().send(Eid::ipn(9, 0), b"logged federation".to_vec(), 3600).unwrap();
+        island.lock().unwrap().send(Eid::ipn(7, 0), b"for dead lab".to_vec(), 3600).unwrap();
+
+        let log = Arc::new(Mutex::new(ContactLog::open_in_memory().unwrap()));
+        let report = fed.sweep_logged(&island, None, Some(&log));
+        assert_eq!(report.successes.len(), 1);
+        assert_eq!(report.failures.len(), 1);
+
+        let recs = log.lock().unwrap().contacts_since(0).unwrap();
+        assert_eq!(recs.len(), 2, "success and failure must both be recorded");
+        let ok = recs.iter().find(|r| r.ok).unwrap();
+        assert!(ok.peer.contains("ipn:10.0"), "success records the gateway hello EID");
+        assert_eq!(ok.sent, 1, "the bundle pushed to the hq gateway is counted");
+        assert_eq!(ok.kind, Kind::Federation);
+        let bad = recs.iter().find(|r| !r.ok).unwrap();
+        assert_eq!(bad.peer, dead, "failure records the dial address");
+        assert_eq!(bad.kind, Kind::Federation);
+
+        // Kind filtering separates federation traffic from peers.
+        let fed_only = log.lock().unwrap().summary_of(Kind::Federation).unwrap();
+        assert_eq!(fed_only.len(), 2);
+        assert!(log.lock().unwrap().summary_of(Kind::Peer).unwrap().is_empty());
+
+        // The gateway really holds the bundle.
+        assert_eq!(gateway_node.lock().unwrap().store.count().unwrap(), 1);
     }
 }
