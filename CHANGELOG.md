@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.15.0 (2026-11-13)
+
+Phase 16 — RFC 9173 default security context identifiers.
+
+- dtn-bpsec::rfc9173 (new module): the two RFC 9173 context ids are
+  now carried on the wire. BIB-HMAC-SHA2 (context id 1): HMAC-SHA256
+  over the payload with a shared symmetric key, block data
+  [0x01][key_id u32 BE][32-byte tag], constant-time verification;
+  sign_hmac / verify_hmac with typed outcomes (Valid /
+  NoIntegrityBlock / MultipleIntegrityBlocks / UnknownContext /
+  Invalid). Validated against the RFC 4231 test case 1 vector.
+- BCB-AES-GCM (context id 2): AES-256-GCM payload encryption with the
+  AAD scope covering the CBOR-encoded primary block (RFC 9173
+  section 4.2.2.1) — swapping the destination (or any primary-block
+  field) after encryption fails decryption. Block data
+  [0x02][12-byte nonce][ciphertext || 16-byte tag];
+  encrypt_aes_gcm / decrypt_aes_gcm with typed errors.
+- Legacy Phase 5/6 formats unchanged and coexisting: the context id
+  byte distinguishes the families; the HMAC BIB uses block number 4
+  so a bundle can carry both integrity contexts; each verifier
+  refuses mixed bundles instead of mis-verifying.
+- 17 new tests: roundtrips (incl. wire), context-id / key-id / nonce
+  wire layout, RFC 4231 vector, tampered payload / ciphertext /
+  nonce, wrong keys, AAD-bound primary-block swap, unknown contexts,
+  malformed lengths, multi-block refusal, re-encryption replacement,
+  combined HMAC+GCM pipeline with plaintext never on the wire, and
+  legacy coexistence.
+- docs: architecture.md gains the RFC 9173 section and roadmap
+  update; README status table + standards updated; workspace bumped
+  to 0.15.0.
+- Honest scope: security-parameter negotiation, key distribution and
+  rotation remain future work.
+
+
 ## 0.14.0 (2026-11-12)
 
 Phase 15 — management completion: real per-contact bundle counters,

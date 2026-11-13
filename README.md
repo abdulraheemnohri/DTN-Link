@@ -9,7 +9,7 @@ without requiring a SIM card, cellular subscription or Wi-Fi router for every
 communication. It uses Bundle Protocol v7 (RFC 9171), store-carry-forward
 routing, modular physical transport adapters and optional internet gateways.
 
-## Status: Phases 1-12 + management + federation layers (core, transports, security, adapters, gateways, diagnostics, federation)
+## Status: Phases 1-12 + RFC 9173 security contexts + management + federation layers (core, transports, security, adapters, gateways, diagnostics, federation)
 
 | Component | Status |
 |---|---|
@@ -32,7 +32,8 @@ routing, modular physical transport adapters and optional internet gateways.
 | Interop + performance benchmark suite | implemented + tested (crates/dtn-bench) |
 | Diagnostics: health reports + kind-tagged contact history with per-contact bundle counters (`dtn-link doctor`) | implemented + tested (crates/dtn-diagnostics) |
 | CLI | implemented — init/status/send/receive/bundles/forward/daemon/doctor/verify/keyring/encrypt/decrypt/decode/federation |
-| RFC 9173 context identifiers; signed key rotation | future |
+| RFC 9173 default contexts: BIB-HMAC-SHA2 (ctx 1), BCB-AES-GCM with primary-block AAD (ctx 2) | implemented + tested (crates/dtn-bpsec::rfc9173) |
+| Signed key rotation | future |
 | Bluetooth RFCOMM platform glue (stream layer ready) | next phase |
 | Android / iOS / Windows / Linux apps | Phases 7-9 |
 | Federation: region map, gateway plans, per-region security policy, sweeps over real gateway contacts, `dtn-link federation` CLI | implemented + tested (crates/dtn-federation) |
@@ -70,7 +71,7 @@ See [docs/architecture.md](docs/architecture.md),
 
 - RFC 9171 — Bundle Protocol v7
 - RFC 9172 — Bundle Protocol Security (BIB integrity block implemented; Ed25519 context)
-- RFC 9173 — Default Security Contexts (planned)
+- RFC 9173 — Default Security Contexts (BIB-HMAC-SHA2 context id 1 and BCB-AES-GCM context id 2 implemented in crates/dtn-bpsec::rfc9173)
 - RFC 9174 — TCP Convergence Layer v4 (TCPCLv4 session protocol implemented: SESS handshake, KEEPALIVE, acked XFER; TLS remaining)
 - KISS — LoRa TNC / serial radio modem framing (implemented in crates/dtn-transport)
 

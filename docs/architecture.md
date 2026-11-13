@@ -5,7 +5,7 @@
 1. Application layer — messaging, files, alerts
 2. Identity layer — Ed25519 node identities [implemented]
 3. Bundle layer — BPv7 (RFC 9171) creation/validation [implemented]
-4. Security layer — BPSec (RFC 9172) [BIB integrity implemented]
+4. Security layer — BPSec (RFC 9172) [BIB + BCB implemented, RFC 9173 contexts BIB-HMAC-SHA2 / BCB-AES-GCM]
 5. Routing layer — epidemic, spray-and-wait, opportunistic [implemented]
 6. Storage layer — persistent SQLite queue with dedup + expiry [implemented]
 7. Convergence layer — transports [TCPCL-lite + Wi-Fi Direct owner/member + Bluetooth RFCOMM glue implemented]
@@ -57,9 +57,10 @@
   holding the nonce; `decrypt_bundle` restores the plaintext with the
   shared 32-byte key and returns typed errors on wrong key or tampering.
   Wrong key, tampered ciphertext or tampered nonce all fail closed.
-- **Honest scope**: RFC 9173 context identifiers, AAD scope over the
-  primary block, and key distribution/rotation (knowing which key
-  belongs to which node) are planned next.
+- **Honest scope**: key distribution/rotation (knowing which key
+  belongs to which node) is planned next; RFC 9173 context
+  identifiers and the primary-block AAD scope landed in Phase 16
+  (see below).
 - A DTN endpoint identifier is NOT proof of identity; only signature
   verification against a known key is.
 - **Key distribution**: `dtn_keyring` is the local trust store
@@ -69,6 +70,28 @@
   the trusted key for its source EID. Honest scope: automatic key
   exchange during the contact protocol, signed key rotation and
   web-of-trust are future work.
+
+### RFC 9173 security contexts (Phase 16)
+
+dtn-bpsec::rfc9173 implements the two RFC 9173 default context
+identifiers. Because the codebase's CanonicalBlock has no separate
+context-id field, the context id is the first byte of the block data:
+
+- **BIB-HMAC-SHA2 (context id 1)** — HMAC-SHA256 over the payload
+  bytes with a shared symmetric key; block data
+  `[0x01][key_id u32 BE][32-byte tag]`, verified in constant time.
+  Validated against the RFC 4231 test vector.
+- **BCB-AES-GCM (context id 2)** — AES-256-GCM over the payload with
+  the AAD scope covering the CBOR-encoded primary block (RFC 9173
+  section 4.2.2.1): swapping source, destination, timestamp or
+  lifetime after encryption breaks decryption. Block data
+  `[0x02][12-byte nonce][ciphertext || 16-byte tag]`.
+
+The Phase 5/6 legacy formats (raw Ed25519 BIB, nonce-first BCB)
+remain wire-compatible; each verifier applies to exactly one context
+family and reports UnknownContext / refuses mixed bundles. Honest
+scope: security-parameter negotiation, key distribution and rotation
+remain future work.
 
 ### Multi-hop flow
 
@@ -215,7 +238,8 @@ scope: the receiving gateway forwards with its own routing engine
 (policy only, no topology database).
 ## Roadmap
 
-- Phases 5-6, 8 security (done): BIB integrity, BCB confidentiality, keyring trust store, secured contacts with TOFU key learning. Next: key rotation, MITM enforcement, RFC 9173 contexts, TLS (RFC 9174 §4.4).
+- Phases 5-6, 8 security (done): BIB integrity, BCB confidentiality, keyring trust store, secured contacts with TOFU key learning.
+- Done: Phase 16 RFC 9173 default security contexts — BIB-HMAC-SHA2 (context id 1, HMAC-SHA256, RFC 4231-vector-tested) and BCB-AES-GCM (context id 2, AES-256-GCM with the AAD scope over the CBOR-encoded primary block) in dtn-bpsec::rfc9173. Next: key rotation, MITM enforcement, TLS (RFC 9174 §4.4).
 - Done: Wi-Fi Direct platform glue — GroupOwner listener + member contacts with retry (dtn-transport::wifi_direct).
 - Done: Bluetooth RFCOMM glue — dtn-transport::bluetooth (contact_stream + retry; feature-gated OS SPP serial opening).
 - Phases 7-9: platform apps.
@@ -224,5 +248,5 @@ scope: the receiving gateway forwards with its own routing engine
 - Done: management/diagnostics layer — dtn-diagnostics (HealthReport + ContactLog, dtn-link doctor, daemon contact recording; docs/diagnostics.md).
 - Done: federation layer — dtn-federation (RegionMap, gateway plan, route_to policy, sweep over real gateway contacts; docs/federation.md).
 - Done: Phase 15 management completion — per-contact bundle counters (exchange_counted / exchange_v4_counted), kind-tagged contact log (peer/gateway/federation) with in-place migration of older databases, gateway + federation contact logging, per-region security policies (require-signed blocks plaintext sweeps) and the dtn-link federation show/route/sweep CLI.
-- Next: a network-wide management plane; later: RFC 9173 contexts, TLS (RFC 9174 §4.4), key rotation, MITM enforcement, TLE-driven pass prediction.
+- Next: a network-wide management plane; later: TLS (RFC 9174 §4.4), key rotation, MITM enforcement, TLE-driven pass prediction.
 

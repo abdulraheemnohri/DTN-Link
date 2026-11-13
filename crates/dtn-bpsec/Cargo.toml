@@ -10,3 +10,5 @@ dtn-bpv7.workspace = true
 dtn-identity.workspace = true
 ed25519-dalek.workspace = true
 aes-gcm.workspace = true
+hmac = "0.12"
+sha2 = "0.10"

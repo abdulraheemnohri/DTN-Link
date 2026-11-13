@@ -1,21 +1,28 @@
-//! dtn-bpsec — bundle security (Phases 5-6).
+//! dtn-bpsec — bundle security (Phases 5-6, 16).
 //!
-//! Two BPSec (RFC 9172)-aligned security blocks:
+//! BPSec (RFC 9172) security blocks in two families:
 //!
-//! - Block Integrity Block (BIB, type 11): Ed25519 signature over the
-//!   payload bytes. Any tampering with the payload or the signature
-//!   makes verification fail. See [verify_bundle].
-//! - Block Confidentiality Block (BCB, type 12): AES-256-GCM payload
-//!   encryption, so the plaintext never appears on the wire.
-//!   See [bcb].
+//! - Block Integrity Block (BIB, type 11):
+//!   - Ed25519 signature context ([sign_bundle] / [verify_bundle],
+//!     Phase 5 legacy format: raw 64-byte signature).
+//!   - RFC 9173 **BIB-HMAC-SHA2 (context id 1)** with a shared
+//!     symmetric key ([rfc9173::sign_hmac] / [rfc9173::verify_hmac]).
+//! - Block Confidentiality Block (BCB, type 12):
+//!   - AES-256-GCM payload encryption ([bcb], Phase 6 legacy format:
+//!     `[nonce][ciphertext||tag]`).
+//!   - RFC 9173 **BCB-AES-GCM (context id 2)** with the AAD scope
+//!     covering the CBOR-encoded primary block
+//!     ([rfc9173::encrypt_aes_gcm] / [rfc9173::decrypt_aes_gcm]).
 //!
-//! Honest scope note: full RFC 9173 mandates specific security contexts
-//! (HMAC-SHA256, AES-GCM with AAD scopes). The BIB uses an Ed25519
-//! signature context (public-key integrity, no shared secret needed)
-//! and the BCB encrypts the payload scope only. Key distribution and
-//! the RFC 9173 context identifiers themselves are future work.
+//! The RFC 9173 context id is carried as the first byte of the block
+//! data (this codebase's simplified CanonicalBlock has no separate
+//! context-id field); the legacy formats never start with 0x01/0x02
+//! framing and remain wire-compatible. Honest scope: RFC 9173
+//! parameter negotiation, key distribution and rotation remain
+//! future work.
 
 pub mod bcb;
+pub mod rfc9173;
 
 use dtn_bpv7::{Bundle, CanonicalBlock};
 use dtn_identity::NodeIdentity;
