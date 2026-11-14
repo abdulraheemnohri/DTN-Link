@@ -21,6 +21,9 @@ pub enum FrameError {
     Io(std::io::Error),
     TooLarge(u32),
     Closed,
+    /// Protocol-level refusal detected by a caller of the framing
+    /// helpers (e.g. Phase 17 TOFU enforcement rejecting a hello key).
+    Protocol(&'static str),
 }
 
 impl std::fmt::Display for FrameError {
@@ -29,6 +32,7 @@ impl std::fmt::Display for FrameError {
             FrameError::Io(e) => write!(f, "io error: {e}"),
             FrameError::TooLarge(n) => write!(f, "frame too large: {n}"),
             FrameError::Closed => write!(f, "connection closed"),
+            FrameError::Protocol(m) => write!(f, "protocol error: {m}"),
         }
     }
 }
@@ -72,6 +76,7 @@ mod tests {
     fn loopback_bundle_transfer() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
+
         let server = std::thread::spawn(move || {
             let (mut sock, _) = listener.accept().unwrap();
             let got = read_frame(&mut sock).unwrap();
@@ -90,6 +95,7 @@ mod tests {
     fn rejects_oversized_frame() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
+
         let server = std::thread::spawn(move || {
             let (mut sock, _) = listener.accept().unwrap();
             sock.write_all(&(MAX_FRAME + 1).to_be_bytes()).unwrap();
@@ -98,5 +104,11 @@ mod tests {
         let mut client = TcpStream::connect(addr).unwrap();
         let _ = client.write_all(&[0u8; 8]);
         assert!(server.join().unwrap().is_err());
+    }
+
+    #[test]
+    fn protocol_error_renders() {
+        let e = FrameError::Protocol("hello key rejected");
+        assert_eq!(e.to_string(), "protocol error: hello key rejected");
     }
 }

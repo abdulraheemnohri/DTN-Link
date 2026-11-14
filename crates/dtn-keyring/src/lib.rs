@@ -6,12 +6,22 @@
 //! BPSec verification then answers "is this bundle really signed by
 //! the key I trust for this sender?".
 //!
-//! Honest scope: this is a manual trust-on-first-use (TOFU) store —
-//! keys are added by the operator (CLI or future pairing UI). Automatic
-//! key exchange in the hello/contact protocol, key rotation with
-//! signed key-change messages, and a web-of-trust are future work.
+//! Phase 17 — MITM hardening:
+//!   * `Keyring::check` classifies a presented hello key as
+//!     New / Match / Mismatch against the trusted key.
+//!   * Signed key rotation: a `KeyChange` announcement carries the
+//!     new public key plus an Ed25519 signature made by the PREVIOUS
+//!     (currently trusted) key. `Keyring::rotate` only applies a
+//!     change whose signature verifies against the key it is
+//!     replacing — an attacker without the old private key cannot
+//!     rotate a peer's entry.
+//!
+//! Honest scope: this remains a trust-on-first-use (TOFU) store —
+//! the FIRST key seen for an EID is trusted (operator-managed via
+//! the CLI or learned during a contact). A web-of-trust and
+//! operator-confirmed key pinning are future work.
 
-use ed25519_dalek::VerifyingKey;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rusqlite::{params, Connection};
 use std::path::Path;
 
@@ -30,6 +40,136 @@ pub struct TrustedKey {
 pub enum LookupError {
     /// EID not in the keyring — cannot verify.
     UnknownKey,
+}
+
+/// Result of comparing a presented key with the trusted key for an
+/// EID (Phase 17 TOFU classification).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TofuCheck {
+    /// No trusted key yet — first contact (trust-on-first-use).
+    New,
+    /// Presented key equals the trusted key.
+    Match,
+    /// Presented key DIFFERS from the trusted key: either a genuine
+    /// rotation or a man-in-the-middle. Callers decide enforcement.
+    Mismatch,
+}
+
+/// Outcome of a signed key-rotation attempt (Phase 17).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyRotation {
+    /// The trusted key was replaced with the announced new key.
+    Rotated,
+    /// No trusted key exists for this EID — there is nothing to
+    /// rotate from (a first key must be TOFU'd or added manually).
+    UnknownKey,
+    /// The announcement's signature does not verify against the
+    /// currently trusted key — rejected.
+    InvalidSignature,
+}
+
+/// Wire-format errors for `KeyChange::decode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyChangeError {
+    /// Wrong magic, truncated fields, trailing bytes or a key that is
+    /// not a valid Ed25519 point.
+    Malformed,
+}
+
+/// Magic prefix of an encoded `KeyChange` announcement.
+pub const KEYCHANGE_MAGIC: &[u8; 6] = b"DTNKC1";
+
+/// A signed key-rotation announcement (Phase 17).
+///
+/// The node that rotated its identity key signs the NEW public key
+/// with the OLD (previously trusted) private key. Peers holding the
+/// old key can verify the change and update their trust store;
+/// an attacker who does not control the old key cannot.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeyChange {
+    /// EID whose key is being rotated.
+    pub eid: String,
+    /// The new public key.
+    pub new_key: VerifyingKey,
+    /// Unix seconds when the rotation was performed.
+    pub rotated_at: u64,
+    /// Ed25519 signature by the OLD key over
+    /// `eid || new_key || rotated_at`.
+    pub signature: Signature,
+}
+
+impl KeyChange {
+    /// Bytes covered by the signature.
+    pub fn signed_bytes(&self) -> Vec<u8> {
+        let mut msg = Vec::with_capacity(self.eid.len() + 40);
+        msg.extend_from_slice(self.eid.as_bytes());
+        msg.extend_from_slice(self.new_key.as_bytes());
+        msg.extend_from_slice(&self.rotated_at.to_be_bytes());
+        msg
+    }
+
+    /// Create a rotation announcement signed with the OLD signing key.
+    pub fn sign(
+        eid: &str,
+        old_signing: &SigningKey,
+        new_key: &VerifyingKey,
+        rotated_at: u64,
+    ) -> KeyChange {
+        let mut kc = KeyChange {
+            eid: eid.to_string(),
+            new_key: *new_key,
+            rotated_at,
+            signature: Signature::from_bytes(&[0u8; 64]),
+        };
+        kc.signature = old_signing.sign(&kc.signed_bytes());
+        kc
+    }
+
+    /// Verify the announcement against a candidate OLD (trusted) key.
+    pub fn verify_signature(&self, trusted: &VerifyingKey) -> bool {
+        trusted.verify(&self.signed_bytes(), &self.signature).is_ok()
+    }
+
+    /// Wire encoding:
+    /// `[DTNKC1][u16 eid len][eid][32-byte new key][u64 rotated_at][64-byte sig]`
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(6 + 2 + self.eid.len() + 32 + 8 + 64);
+        out.extend_from_slice(KEYCHANGE_MAGIC);
+        out.extend_from_slice(&(self.eid.len() as u16).to_be_bytes());
+        out.extend_from_slice(self.eid.as_bytes());
+        out.extend_from_slice(self.new_key.as_bytes());
+        out.extend_from_slice(&self.rotated_at.to_be_bytes());
+        out.extend_from_slice(&self.signature.to_bytes());
+        out
+    }
+
+    /// Strict decoder: exact field lengths, no trailing bytes.
+    pub fn decode(bytes: &[u8]) -> Result<KeyChange, KeyChangeError> {
+        if bytes.len() < 6 + 2 + 32 + 8 + 64 || &bytes[..6] != KEYCHANGE_MAGIC {
+            return Err(KeyChangeError::Malformed);
+        }
+        let mut i = 6;
+        let eid_len = u16::from_be_bytes([bytes[i], bytes[i + 1]]) as usize;
+        i += 2;
+        if bytes.len() != i + eid_len + 32 + 8 + 64 {
+            return Err(KeyChangeError::Malformed);
+        }
+        let eid = String::from_utf8(bytes[i..i + eid_len].to_vec())
+            .map_err(|_| KeyChangeError::Malformed)?;
+        i += eid_len;
+        let mut kb = [0u8; 32];
+        kb.copy_from_slice(&bytes[i..i + 32]);
+        i += 32;
+        let new_key = VerifyingKey::from_bytes(&kb).map_err(|_| KeyChangeError::Malformed)?;
+        let mut tb = [0u8; 8];
+        tb.copy_from_slice(&bytes[i..i + 8]);
+        i += 8;
+        let rotated_at = u64::from_be_bytes(tb);
+        let mut sb = [0u8; 64];
+        sb.copy_from_slice(&bytes[i..i + 64]);
+        let signature = Signature::from_bytes(&sb);
+        Ok(KeyChange { eid, new_key, rotated_at, signature })
+    }
 }
 
 impl Keyring {
@@ -78,6 +218,31 @@ impl Keyring {
             }
             Some(_) => Err(rusqlite::Error::InvalidQuery),
         }
+    }
+
+    /// Classify a presented key against the trusted key for an EID
+    /// (Phase 17). Never mutates the store.
+    pub fn check(&self, eid: &str, key: &VerifyingKey) -> Result<TofuCheck, rusqlite::Error> {
+        match self.get(eid)? {
+            None => Ok(TofuCheck::New),
+            Some(trusted) if trusted.as_bytes() == key.as_bytes() => Ok(TofuCheck::Match),
+            Some(_) => Ok(TofuCheck::Mismatch),
+        }
+    }
+
+    /// Apply a signed key-rotation announcement (Phase 17). The
+    /// announcement's signature must verify against the key that is
+    /// CURRENTLY trusted for the EID; otherwise the store is not
+    /// touched.
+    pub fn rotate(&mut self, change: &KeyChange) -> Result<KeyRotation, rusqlite::Error> {
+        let Some(trusted) = self.get(&change.eid)? else {
+            return Ok(KeyRotation::UnknownKey);
+        };
+        if !change.verify_signature(&trusted) {
+            return Ok(KeyRotation::InvalidSignature);
+        }
+        self.put(&change.eid, &change.new_key)?;
+        Ok(KeyRotation::Rotated)
     }
 
     pub fn remove(&mut self, eid: &str) -> Result<bool, rusqlite::Error> {
@@ -248,5 +413,90 @@ mod tests {
         let k2 = Keyring::open(&path).unwrap();
         assert_eq!(k2.get(&id.eid.as_uri()).unwrap().unwrap(), id.public_key());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---- Phase 17: TOFU classification + signed key rotation ----
+
+    #[test]
+    fn tofu_check_classifies_new_match_mismatch() {
+        let mut k = keyring();
+        let (id, _) = identity_and_bundle(5, false);
+        let eid = id.eid.as_uri();
+        assert_eq!(k.check(&eid, &id.public_key()).unwrap(), TofuCheck::New);
+        k.put(&eid, &id.public_key()).unwrap();
+        assert_eq!(k.check(&eid, &id.public_key()).unwrap(), TofuCheck::Match);
+        let other = NodeIdentity::generate(6);
+        assert_eq!(k.check(&eid, &other.public_key()).unwrap(), TofuCheck::Mismatch);
+    }
+
+    #[test]
+    fn key_change_sign_and_verify() {
+        let old = NodeIdentity::from_seed(5, [9u8; 32]);
+        let new = NodeIdentity::from_seed(5, [10u8; 32]); // same EID, new key
+        let kc = KeyChange::sign(&old.eid.as_uri(), &old.signing_key(), &new.public_key(), 1700);
+        assert!(kc.verify_signature(&old.public_key()));
+        assert!(!kc.verify_signature(&new.public_key()), "must verify against the OLD key only");
+    }
+
+    #[test]
+    fn key_change_wire_roundtrip() {
+        let old = NodeIdentity::from_seed(5, [9u8; 32]);
+        let new = NodeIdentity::from_seed(5, [10u8; 32]);
+        let kc = KeyChange::sign(&old.eid.as_uri(), &old.signing_key(), &new.public_key(), 1750);
+        let wire = kc.encode();
+        let decoded = KeyChange::decode(&wire).unwrap();
+        assert_eq!(decoded, kc);
+        assert!(decoded.verify_signature(&old.public_key()));
+    }
+
+    #[test]
+    fn key_change_decode_rejects_garbage() {
+        assert_eq!(KeyChange::decode(b"nope"), Err(KeyChangeError::Malformed));
+        let old = NodeIdentity::from_seed(5, [9u8; 32]);
+        let new = NodeIdentity::from_seed(5, [10u8; 32]);
+        let wire = KeyChange::sign(&old.eid.as_uri(), &old.signing_key(), &new.public_key(), 1).encode();
+        // Truncated.
+        assert_eq!(KeyChange::decode(&wire[..wire.len() - 1]), Err(KeyChangeError::Malformed));
+        // Trailing byte.
+        let mut extra = wire.clone();
+        extra.push(0);
+        assert_eq!(KeyChange::decode(&extra), Err(KeyChangeError::Malformed));
+        // Wrong magic.
+        let mut bad = wire.clone();
+        bad[0] = b'X';
+        assert_eq!(KeyChange::decode(&bad), Err(KeyChangeError::Malformed));
+    }
+
+    #[test]
+    fn rotate_applies_validly_signed_change() {
+        let mut k = keyring();
+        let old = NodeIdentity::from_seed(5, [9u8; 32]);
+        let new = NodeIdentity::from_seed(5, [10u8; 32]);
+        let eid = old.eid.as_uri();
+        k.put(&eid, &old.public_key()).unwrap();
+        let kc = KeyChange::sign(&eid, &old.signing_key(), &new.public_key(), 1800);
+        assert_eq!(k.rotate(&kc).unwrap(), KeyRotation::Rotated);
+        assert_eq!(k.get(&eid).unwrap().unwrap(), new.public_key());
+    }
+
+    #[test]
+    fn rotate_rejects_unsigned_and_unknown() {
+        let mut k = keyring();
+        let old = NodeIdentity::from_seed(5, [9u8; 32]);
+        let new = NodeIdentity::from_seed(5, [10u8; 32]);
+        let attacker = NodeIdentity::generate(99);
+        let eid = old.eid.as_uri();
+        k.put(&eid, &old.public_key()).unwrap();
+
+        // Signed by a key that is NOT the currently trusted one.
+        let forged = KeyChange::sign(&eid, &attacker.signing_key(), &new.public_key(), 1800);
+        assert_eq!(k.rotate(&forged).unwrap(), KeyRotation::InvalidSignature);
+        assert_eq!(k.get(&eid).unwrap().unwrap(), old.public_key(), "store must be untouched");
+
+        // Valid rotation, then an unknown EID: nothing to rotate from.
+        let kc = KeyChange::sign(&eid, &old.signing_key(), &new.public_key(), 1800);
+        assert_eq!(k.rotate(&kc).unwrap(), KeyRotation::Rotated);
+        let fresh = KeyChange::sign("dtn://ghost", &old.signing_key(), &new.public_key(), 1800);
+        assert_eq!(k.rotate(&fresh).unwrap(), KeyRotation::UnknownKey);
     }
 }

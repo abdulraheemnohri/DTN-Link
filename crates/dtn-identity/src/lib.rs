@@ -1,6 +1,6 @@
 //! dtn-identity — cryptographic node identity (Phase 1).
 //!
-//! Ed25519 key pairs via `ed25519-dalek`. An EID alone is NEVER proof of
+//! Ed25519 key pairs via `ed25519-dalek`. An EID alone is never proof of
 //! identity — trust decisions must use signatures.
 
 use dtn_bpv7::Eid;
@@ -31,6 +31,10 @@ impl NodeIdentity {
 
     pub fn public_key(&self) -> VerifyingKey { self.signing.verifying_key() }
 
+    /// The signing key itself (Phase 17): needed to sign a key-rotation
+    /// announcement with the OLD identity key before retiring it.
+    pub fn signing_key(&self) -> SigningKey { self.signing.clone() }
+
     pub fn sign(&self, msg: &[u8]) -> Signature { self.signing.sign(msg) }
 
     pub fn verify(peer_key: &VerifyingKey, msg: &[u8], sig: &Signature) -> bool {
@@ -59,5 +63,12 @@ mod tests {
         let a = NodeIdentity::from_seed(9, [7u8; 32]);
         let b = NodeIdentity::from_seed(9, [7u8; 32]);
         assert_eq!(a.seed_bytes(), b.seed_bytes());
+    }
+
+    #[test]
+    fn signing_key_accessor_matches_identity() {
+        let a = NodeIdentity::from_seed(9, [7u8; 32]);
+        let sig = a.signing_key().sign(b"phase 17");
+        assert!(NodeIdentity::verify(&a.public_key(), b"phase 17", &sig));
     }
 }
