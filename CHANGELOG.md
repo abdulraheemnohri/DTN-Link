@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.16.0 (2026-11-14)
+
+Phase 17 — MITM enforcement + signed key rotation.
+
+- dtn-keyring: `Keyring::check` classifies a presented hello key as
+  TofuCheck::New / Match / Mismatch against the trusted key (no store
+  mutation). New signed key-rotation record `KeyChange` — wire format
+  `[DTNKC1][u16 eid len][eid][32-byte new key][u64 rotated_at][64-byte
+  Ed25519 signature]`, signed by the PREVIOUSLY trusted (old) key over
+  `eid || new_key || rotated_at`; strict `decode` (exact lengths, no
+  trailing bytes, valid Ed25519 point) and `Keyring::rotate`, which
+  applies the change only when the signature verifies against the key
+  currently trusted for the EID (Rotated / UnknownKey /
+  InvalidSignature; the store is untouched on rejection).
+- dtn-identity: `signing_key()` accessor — the OLD identity key must
+  sign the rotation announcement before being retired.
+- dtn-tcpcl: new `FrameError::Protocol(&'static str)` variant so
+  callers of the framing helpers can refuse a contact at the protocol
+  level (used by TOFU enforcement).
+- dtn-daemon: `SecurityCtx::enforce_tofu` (plus
+  `DaemonConfig::enforce_tofu`) — a hello key that differs from the
+  trusted key FAILS the contact (FrameError::Protocol) unless the peer
+  presents a valid `KeyChange` announcement in the hello, which is
+  verified against the currently trusted key and applied via rotate.
+  `SecurityCtx::pending_rotation` lets a rotated node announce its new
+  key during the hello. In strict (enforcing) mode, signed bundles
+  from sources with no trusted key are DROPPED instead of accepted
+  with a log line. The hello probe distinguishes a rotation frame
+  (DTNKC1 magic) from a first bundle frame (legacy peers) and from
+  end-of-batch, so 0.15 peers interoperate unchanged.
+- cli: daemon gains `--no-enforce-tofu` (legacy warn-only behavior;
+  enforcement is the default); the federation sweep SecurityCtx uses
+  enforcement; usage text + version string updated (0.16.0).
+- 14 new tests: TOFU classification, KeyChange sign/verify (old key
+  only), wire roundtrip, strict decode rejections (truncated /
+  trailing / wrong magic), rotate success / forged / unknown-EID,
+  enforced MITM key-switch fails the live contact with the trusted
+  key untouched, legacy warn-mode completes but still BIB-rejects the
+  impostor's bundle, signed rotation accepted + applied + new-key
+  bundle delivered over real loopback TCP, forged rotation rejected,
+  strict-mode unknown-source drop vs legacy acceptance, signing-key
+  accessor, FrameError::Protocol rendering.
+- docs: architecture.md gains the Phase 17 section; roadmap updated.
+- Honest scope: a rotation announcement is only understood by peers
+  on >= 0.16 (announcing to an older peer degrades that one contact);
+  web-of-trust and operator-confirmed key pinning remain future work;
+  TLS (RFC 9174 §4.4) unchanged.
+
+
 ## 0.15.0 (2026-11-13)
 
 Phase 16 — RFC 9173 default security context identifiers.
@@ -392,4 +441,3 @@ Phases 2-4 — multi-hop forwarding, hybrid routing, TCP transport.
 
 Phase 1 — Rust core foundation (BPv7 CBOR, identity, SQLite store, node
 engine, CLI, CI).
-

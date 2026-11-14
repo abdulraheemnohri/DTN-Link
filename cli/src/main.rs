@@ -1,4 +1,4 @@
-//! dtn-link CLI (Phases 1-8 + management + federation layers).
+//! dtn-link CLI (Phases 1-8 + management + federation + MITM hardening).
 
 use dtn_bpv7::{Bundle, Eid};
 use dtn_core::Node;
@@ -157,6 +157,10 @@ fn main() {
             let interval: u64 = args.iter().position(|a| a == "--interval")
                 .and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(30);
             let insecure = args.iter().any(|a| a == "--insecure");
+            // Phase 17: hello-key mismatch is a hard failure unless the
+            // peer presents a valid signed key rotation. Opt out with
+            // --no-enforce-tofu (legacy warn-only behavior).
+            let enforce_tofu = !args.iter().any(|a| a == "--no-enforce-tofu");
             let keyring = if insecure {
                 None
             } else {
@@ -177,6 +181,7 @@ fn main() {
                 db: db_path(),
                 keyring,
                 contact_log,
+                enforce_tofu,
             };
             dtn_daemon::run(cfg).expect("daemon failed");
         }
@@ -438,6 +443,8 @@ fn main() {
                         dtn_daemon::SecurityCtx {
                             keyring: std::sync::Arc::new(std::sync::Mutex::new(kr)),
                             sign_outbound: true,
+                            enforce_tofu: true,
+                            pending_rotation: None,
                         }
                     });
                     let contact_log = {
@@ -502,10 +509,10 @@ fn main() {
                 }
             }
         }
-        Some("version") => println!("dtn-link 0.14.0 (BPv7, TCPCLv4, BPSec, gateways, federation, diagnostics)"),
+        Some("version") => println!("dtn-link 0.16.0 (BPv7, TCPCLv4, BPSec, gateways, federation, diagnostics, TOFU enforcement)"),
         _ => {
             eprintln!(
-                "dtn-link — decentralized DTN communication (phases 1-6)
+                "dtn-link — decentralized DTN communication
 usage:
   dtn-link init [node-number]
   dtn-link status
@@ -514,7 +521,7 @@ usage:
   dtn-link receive        (bundle bytes on stdin)
   dtn-link bundles
   dtn-link forward <dtn://peer> [strategy]
-  dtn-link daemon --listen 0.0.0.0:4556 [--peers host:port,...] [--strategy epidemic|spray|opportunistic] [--interval 30] [--insecure]
+  dtn-link daemon --listen 0.0.0.0:4556 [--peers host:port,...] [--strategy epidemic|spray|opportunistic] [--interval 30] [--no-enforce-tofu] [--insecure]
   dtn-link verify <pubkey-hex>   (bundle bytes on stdin)
   dtn-link decode         (bundle bytes on stdin, prints structure)
   dtn-link federation show <plan-file> [regions-file]

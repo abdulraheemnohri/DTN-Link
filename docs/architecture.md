@@ -21,6 +21,7 @@
 |     doctor/verify/decode                                |
 +--------------------------------------------------------+
 | dtn-daemon: contacts with sign/verify + TOFU key learn |
+|   + MITM enforcement + signed key rotation (Phase 17)   |
 |   + contact-outcome logging (dtn-diagnostics)           |
 | dtn-transport: framing codecs (length-prefix, KISS) +   |
 |   streams + Wi-Fi Direct group owner/member glue +       |
@@ -29,7 +30,7 @@
 | dtn-federation: RegionMap + gateway plan + sweeps      |
 |   over real dtn-gateway contacts (inter-region routing)  |
 | dtn-bpsec: BIB (type 11) Ed25519 sig + BCB (type 12)   |
-| dtn-keyring: trusted keys per EID (TOFU trust store)    |
+| dtn-keyring: trusted keys per EID (TOFU trust store)   |
 | dtn-diagnostics: HealthReport + ContactLog (doctor)     |
 +--------------------------------------------------------+
 | dtn-core: Node                                          |
@@ -57,19 +58,18 @@
   holding the nonce; `decrypt_bundle` restores the plaintext with the
   shared 32-byte key and returns typed errors on wrong key or tampering.
   Wrong key, tampered ciphertext or tampered nonce all fail closed.
-- **Honest scope**: key distribution/rotation (knowing which key
-  belongs to which node) is planned next; RFC 9173 context
-  identifiers and the primary-block AAD scope landed in Phase 16
-  (see below).
+- **Honest scope**: web-of-trust and security-parameter negotiation
+  are future work; RFC 9173 context identifiers and the primary-block
+  AAD scope landed in Phase 16 (see below).
 - A DTN endpoint identifier is NOT proof of identity; only signature
   verification against a known key is.
 - **Key distribution**: `dtn_keyring` is the local trust store
   (EID → trusted Ed25519 public key, SQLite). The operator adds keys
   with `dtn-link keyring add` (trust-on-first-use);
   `dtn_keyring::verify_signed_bundle` checks a bundle's BIB against
-  the trusted key for its source EID. Honest scope: automatic key
-  exchange during the contact protocol, signed key rotation and
-  web-of-trust are future work.
+  the trusted key for its source EID. Honest scope: web-of-trust is
+  future work; automatic in-contact key learning and signed rotation
+  landed in Phases 8 and 17.
 
 ### RFC 9173 security contexts (Phase 16)
 
@@ -90,8 +90,40 @@ context-id field, the context id is the first byte of the block data:
 The Phase 5/6 legacy formats (raw Ed25519 BIB, nonce-first BCB)
 remain wire-compatible; each verifier applies to exactly one context
 family and reports UnknownContext / refuses mixed bundles. Honest
-scope: security-parameter negotiation, key distribution and rotation
-remain future work.
+scope: security-parameter negotiation remains future work.
+
+### MITM enforcement + signed key rotation (Phase 17)
+
+The Phase 8 TOFU hello logged a warning when a peer presented a
+different key than the trusted one and continued. Phase 17 hardens
+this:
+
+- **TOFU classification** — `Keyring::check(eid, key)` returns
+  New / Match / Mismatch without mutating the store.
+- **Enforcement** — `SecurityCtx::enforce_tofu` (default ON in the
+  daemon and CLI; opt out with `--no-enforce-tofu`): a hello key that
+  differs from the trusted key FAILS the contact
+  (`FrameError::Protocol`), nothing is stored, and the trusted entry
+  is untouched. Strict mode also DROPS signed bundles from sources
+  with no trusted key (previously accepted with a log line).
+- **Signed key rotation** — a node that rotated its identity key
+  announces the change in the hello via
+  `SecurityCtx::pending_rotation`: a `dtn_keyring::KeyChange` wire
+  record (`DTNKC1` magic, EID, new key, timestamp) signed by the OLD
+  (previously trusted) key. The peer verifies the signature against
+  the key it currently trusts and only then applies
+  `Keyring::rotate` — an attacker without the old private key cannot
+  rotate a peer's entry, and a forged announcement fails the enforced
+  contact.
+- Live tests: enforced mismatch fails the contact with nothing
+  stored; legacy warn-mode completes but still BIB-rejects the
+  impostor's bundle; a validly signed rotation is accepted, applied
+  to the keyring and the new-key-signed bundle is delivered; a forged
+  rotation is rejected; strict mode drops unknown-source bundles.
+
+Honest scope: a rotation announcement is only understood by peers on
+>= 0.16 (announcing to an older peer degrades that one contact);
+web-of-trust and operator-confirmed pinning remain future work.
 
 ### Multi-hop flow
 
@@ -117,15 +149,17 @@ Every decision carries an explainable reason string.
 
 When a keyring is configured, a TCPCL-lite contact becomes:
 
-1. Hello: EID frame + 32-byte Ed25519 public key frame (both sides).
+1. Hello: EID frame + 32-byte Ed25519 public key frame (both sides),
+   plus an optional signed key-rotation announcement frame (Phase 17).
 2. TOFU: each side stores the peer's key in its keyring on first
-   contact; a changed key logs a warning (no enforcement yet — MITM
-   hardening is future work).
+   contact; a changed key fails the contact under enforcement
+   (Phase 17) unless a valid signed rotation is presented.
 3. Outbound bundles are signed (BIB) with the node identity; the
    identity seed persists across restarts (`Node::open_persistent`).
 4. Inbound: signed bundles are verified against the trusted key for
-   the source EID — Invalid / malformed are dropped; unsigned and
-   unknown-source signed bundles are accepted with a log line.
+   the source EID — Invalid / malformed are dropped; unsigned bundles
+   are accepted; unknown-source signed bundles follow the strict-mode
+   policy (Phase 17).
 
 TCPCLv4 contacts sign/verify too, but the RFC 9174 session EID carries
 no key — hello key learning is TCPCL-lite only (honest limitation).
@@ -198,8 +232,8 @@ future work.
 
 ### Diagnostics (management layer)
 
-dtn-diagnostics answers two operational questions without moving
-any bundles:
+dtn-diagnostics answers two operational questions without moving any
+bundles:
 
 - **HealthReport::scan(&Node, now, soon)** — store-wide scan: totals,
   delivered vs pending-inbox, expired-now (the daemon cleanup
@@ -236,10 +270,12 @@ require-signed region is never contacted without the BPSec stack)
 and the `dtn-link federation show/route/sweep` CLI commands. Honest
 scope: the receiving gateway forwards with its own routing engine
 (policy only, no topology database).
+
 ## Roadmap
 
 - Phases 5-6, 8 security (done): BIB integrity, BCB confidentiality, keyring trust store, secured contacts with TOFU key learning.
-- Done: Phase 16 RFC 9173 default security contexts — BIB-HMAC-SHA2 (context id 1, HMAC-SHA256, RFC 4231-vector-tested) and BCB-AES-GCM (context id 2, AES-256-GCM with the AAD scope over the CBOR-encoded primary block) in dtn-bpsec::rfc9173. Next: key rotation, MITM enforcement, TLS (RFC 9174 §4.4).
+- Done: Phase 16 RFC 9173 default security contexts — BIB-HMAC-SHA2 (context id 1, HMAC-SHA256, RFC 4231-vector-tested) and BCB-AES-GCM (context id 2, AES-256-GCM with the AAD scope over the CBOR-encoded primary block) in dtn-bpsec::rfc9173.
+- Done: Phase 17 MITM enforcement + signed key rotation — TOFU classification (New/Match/Mismatch), enforced hello-key mismatch (contact fails, nothing stored), KeyChange announcements signed by the previously trusted key applied via Keyring::rotate, strict-mode dropping of unknown-source signed bundles, `--no-enforce-tofu` opt-out.
 - Done: Wi-Fi Direct platform glue — GroupOwner listener + member contacts with retry (dtn-transport::wifi_direct).
 - Done: Bluetooth RFCOMM glue — dtn-transport::bluetooth (contact_stream + retry; feature-gated OS SPP serial opening).
 - Phases 7-9: platform apps.
@@ -248,5 +284,4 @@ scope: the receiving gateway forwards with its own routing engine
 - Done: management/diagnostics layer — dtn-diagnostics (HealthReport + ContactLog, dtn-link doctor, daemon contact recording; docs/diagnostics.md).
 - Done: federation layer — dtn-federation (RegionMap, gateway plan, route_to policy, sweep over real gateway contacts; docs/federation.md).
 - Done: Phase 15 management completion — per-contact bundle counters (exchange_counted / exchange_v4_counted), kind-tagged contact log (peer/gateway/federation) with in-place migration of older databases, gateway + federation contact logging, per-region security policies (require-signed blocks plaintext sweeps) and the dtn-link federation show/route/sweep CLI.
-- Next: a network-wide management plane; later: TLS (RFC 9174 §4.4), key rotation, MITM enforcement, TLE-driven pass prediction.
-
+- Next: platform apps (Phases 7-9); later: TLS (RFC 9174 §4.4), web-of-trust, TLE-driven pass prediction, a network-wide management plane.
