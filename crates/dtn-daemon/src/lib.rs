@@ -15,6 +15,16 @@
 //! Unsigned bundles and bundles from unknown sources are accepted
 //! (logged); multiple-BIB malformed bundles are dropped.
 //!
+//! MITM hardening (Phase 17): `SecurityCtx::enforce_tofu` (default in
+//! the daemon and CLI) makes a hello key that DIFFERS from the
+//! trusted key fail the contact unless the peer presents a valid
+//! SIGNED KEY ROTATION announcement (`dtn_keyring::KeyChange`, signed
+//! by the previously trusted key) in the hello. A node that rotated
+//! its identity key announces the change via
+//! `SecurityCtx::pending_rotation`. In strict mode, signed bundles
+//! from sources with no trusted key are also dropped instead of
+//! accepted with a log line.
+//!
 //! Management (Phase 15): when `DaemonConfig::contact_log` is set,
 //! every accepted (TCPCL-lite) connection and every sync attempt is
 //! recorded into a dtn-diagnostics ContactLog — peer EID (or address
@@ -24,15 +34,15 @@
 //! bundles were sent and newly stored per contact; `exchange` and
 //! `exchange_v4` remain the uncounted wrappers.
 //!
-//! Honest scope: key rotation, signed key-change and TLS (RFC 9174
-//! §4.4) remain future work. A mismatch between a learned hello key
-//! and a previously trusted key currently logs a warning and does not
-//! enforce (MITM hardening is future work).
+//! Honest scope: TLS (RFC 9174 §4.4) remains future work. A rotation
+//! announcement is only understood by peers on >= 0.16; announcing a
+//! rotation to an older peer degrades that one contact (the frame is
+//! not a valid bundle). A web-of-trust is future work.
 
 use dtn_bpv7::{Bundle, Eid};
 use dtn_core::Node;
 use dtn_diagnostics::{ContactLog, ContactRecord, Direction, Kind};
-use dtn_keyring::{Keyring, KeyringVerifyOutcome};
+use dtn_keyring::{KeyChange, Keyring, KeyringVerifyOutcome, TofuCheck};
 use dtn_routing::Strategy;
 use dtn_tcpcl::v4::{Event, Session, SessionError, TERM_OTHER};
 use dtn_tcpcl::{read_frame, write_end_of_batch, write_frame, FrameError};
@@ -53,6 +63,9 @@ pub struct DaemonConfig {
     /// SQLite contact-log path (dtn-diagnostics). None = no contact
     /// history recorded.
     pub contact_log: Option<PathBuf>,
+    /// Phase 17: reject contacts whose hello key differs from the
+    /// trusted key without a valid signed rotation (MITM hardening).
+    pub enforce_tofu: bool,
 }
 
 /// Per-node security context: trusted keys + signing identity.
@@ -60,6 +73,12 @@ pub struct SecurityCtx {
     pub keyring: Arc<Mutex<Keyring>>,
     /// Sign outbound bundles with the node identity (BIB).
     pub sign_outbound: bool,
+    /// Phase 17: enforce hello-key mismatch as a contact failure
+    /// unless a valid signed rotation is presented.
+    pub enforce_tofu: bool,
+    /// Phase 17: a signed key-rotation announcement to send during
+    /// the hello (set after this node rotated its identity key).
+    pub pending_rotation: Option<KeyChange>,
 }
 
 /// Per-contact bundle counters, straight from the exchange loop.
@@ -102,25 +121,70 @@ fn parse_eid(bytes: &[u8]) -> Eid {
 }
 
 /// TOFU-learn (or check) a peer's public key learned from hello.
-fn learn_peer_key(sec: &SecurityCtx, peer_uri: &str, key: &ed25519_dalek::VerifyingKey) {
+/// Returns false when the contact must be rejected (enforced key
+/// mismatch without a valid signed rotation).
+fn learn_peer_key(
+    sec: &SecurityCtx,
+    peer_uri: &str,
+    key: &ed25519_dalek::VerifyingKey,
+    rotation_frame: Option<&[u8]>,
+) -> bool {
     let mut kr = sec.keyring.lock().unwrap();
-    match kr.get(peer_uri) {
-        Ok(Some(existing)) => {
-            if existing.as_bytes() != key.as_bytes() {
-                eprintln!("[daemon] WARNING: peer {peer_uri} presented a different key than the trusted one (possible rotation or MITM); not enforcing");
-            }
-        }
-        Ok(None) => {
+    match kr.check(peer_uri, key) {
+        Ok(TofuCheck::New) => {
             let _ = kr.put(peer_uri, key);
             eprintln!("[daemon] TOFU: trusted new key for {peer_uri}");
+            true
         }
-        Err(e) => eprintln!("[daemon] keyring error: {e}"),
+        Ok(TofuCheck::Match) => true,
+        Ok(TofuCheck::Mismatch) => {
+            // A signed rotation announcement redeems a key change.
+            if let Some(frame) = rotation_frame {
+                match KeyChange::decode(frame) {
+                    Ok(change)
+                        if change.eid == peer_uri
+                            && change.new_key.as_bytes() == key.as_bytes() =>
+                    {
+                        match kr.rotate(&change) {
+                            Ok(dtn_keyring::KeyRotation::Rotated) => {
+                                eprintln!("[daemon] accepted SIGNED key rotation for {peer_uri}");
+                                return true;
+                            }
+                            Ok(other) => {
+                                eprintln!("[daemon] rotation for {peer_uri} not applied: {other:?}");
+                            }
+                            Err(e) => eprintln!("[daemon] keyring error during rotation: {e}"),
+                        }
+                    }
+                    Ok(_) => eprintln!("[daemon] rotation announcement does not match the presented key/EID"),
+                    Err(_) => eprintln!("[daemon] malformed rotation announcement"),
+                }
+            }
+            if sec.enforce_tofu {
+                eprintln!(
+                    "[daemon] REJECTED: peer {peer_uri} presented a different key than the trusted one and no valid signed rotation was given"
+                );
+                false
+            } else {
+                eprintln!(
+                    "[daemon] WARNING: peer {peer_uri} presented a different key than the trusted one (possible rotation or MITM); not enforcing"
+                );
+                true
+            }
+        }
+        Err(e) => {
+            eprintln!("[daemon] keyring error: {e}");
+            // Fail closed under enforcement, open in legacy mode.
+            !sec.enforce_tofu
+        }
     }
 }
 
 /// Security-filtered receive: drops bundles whose BIB signature is
 /// Invalid under the trusted key for the source EID. Unsigned bundles
-/// and unknown-source signed bundles are accepted (logged).
+/// are accepted. Signed bundles from unknown sources are accepted
+/// with a log line — unless `enforce_tofu` (Phase 17 strict mode),
+/// which drops them.
 /// Returns Some(bundle) when a new bundle was stored.
 fn secured_receive(
     node: &Arc<Mutex<Node>>,
@@ -143,8 +207,13 @@ fn secured_receive(
             Ok(None)
         }
         Ok(KeyringVerifyOutcome::UnknownSource) => {
-            eprintln!("[daemon] note: signed bundle from untrusted source {} accepted (TOFU it later or add a key)", bundle.primary.source_node.as_uri());
-            node.lock().unwrap().receive(wire)
+            if sec.enforce_tofu {
+                eprintln!("[daemon] REJECTED: signed bundle from unknown source {} (strict TOFU mode)", bundle.primary.source_node.as_uri());
+                Ok(None)
+            } else {
+                eprintln!("[daemon] note: signed bundle from untrusted source {} accepted (TOFU it later or add a key)", bundle.primary.source_node.as_uri());
+                node.lock().unwrap().receive(wire)
+            }
         }
         Ok(KeyringVerifyOutcome::NoIntegrityBlock) => node.lock().unwrap().receive(wire),
         Err(e) => {
@@ -169,7 +238,9 @@ fn outbound_wire(node: &Arc<Mutex<Node>>, sec: Option<&SecurityCtx>, bundle: &Bu
 /// Exchange bundles with a connected peer stream (TCPCL-lite),
 /// reporting how many bundles were sent and newly stored.
 /// When security is enabled, hello = [EID frame][32-byte pubkey frame]
-/// and keys are TOFU-learned into the keyring.
+/// (+ an optional signed key-rotation announcement frame), keys are
+/// TOFU-learned into the keyring, and an enforced key mismatch fails
+/// the contact (Phase 17).
 pub fn exchange_counted(
     node: &Arc<Mutex<Node>>,
     sec: Option<&SecurityCtx>,
@@ -181,11 +252,23 @@ pub fn exchange_counted(
         if sec.sign_outbound {
             let key = node.lock().unwrap().identity.public_key();
             write_frame(stream, key.as_bytes())?;
+            // Phase 17: announce a pending key rotation, if any.
+            if let Some(kc) = &sec.pending_rotation {
+                write_frame(stream, &kc.encode())?;
+            }
         }
     }
     let peer_raw = read_frame(stream)?;
     let peer = parse_eid(&peer_raw);
     let peer_uri = String::from_utf8_lossy(&peer_raw).trim().to_string();
+
+    // Read the peer's hello key (and optional rotation announcement).
+    // The frame AFTER the key frame may be (a) a rotation
+    // announcement, (b) a first bundle (legacy peer / no rotation), or
+    // (c) end-of-batch (peer has nothing to send). KeyChange frames
+    // start with the DTNKC1 magic, so (a) and (b) are distinguishable.
+    let mut rotation_frame: Option<Vec<u8>> = None;
+    let mut preloaded: Option<Vec<u8>> = None;
     if let Some(sec) = sec {
         if sec.sign_outbound {
             let key_raw = read_frame(stream)?;
@@ -193,7 +276,18 @@ pub fn exchange_counted(
                 let mut arr = [0u8; 32];
                 arr.copy_from_slice(&key_raw);
                 if let Ok(key) = ed25519_dalek::VerifyingKey::from_bytes(&arr) {
-                    learn_peer_key(sec, &peer_uri, &key);
+                    // Peek the next frame to classify it.
+                    match read_frame(stream) {
+                        Ok(next) => match KeyChange::decode(&next) {
+                            Ok(_) => rotation_frame = Some(next),
+                            Err(_) => preloaded = Some(next),
+                        },
+                        Err(FrameError::Closed) => {} // nothing else in the hello
+                        Err(e) => return Err(e),
+                    }
+                    if !learn_peer_key(sec, &peer_uri, &key, rotation_frame.as_deref()) {
+                        return Err(FrameError::Protocol("hello key rejected (TOFU enforcement)"));
+                    }
                 }
             }
         }
@@ -213,6 +307,11 @@ pub fn exchange_counted(
         sent: outbound.len(),
         received: 0,
     };
+    if let Some(bytes) = preloaded {
+        if secured_receive(node, sec, &bytes)?.is_some() {
+            counts.received += 1;
+        }
+    }
     loop {
         match read_frame(stream) {
             Ok(bytes) => {
@@ -401,6 +500,8 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<()> {
             Some(Arc::new(SecurityCtx {
                 keyring: Arc::new(Mutex::new(kr)),
                 sign_outbound: true,
+                enforce_tofu: cfg.enforce_tofu,
+                pending_rotation: None,
             }))
         }
         None => None,
@@ -417,8 +518,9 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<()> {
     };
     let node = Arc::new(Mutex::new(node));
     let listener = TcpListener::bind(&cfg.listen)?;
-    println!("[daemon] listening on {} (security {}, contact log {})", cfg.listen,
+    println!("[daemon] listening on {} (security {}, TOFU enforcement {}, contact log {})", cfg.listen,
         if sec.is_some() { "ON — sign + TOFU key learning + verify" } else { "OFF" },
+        if sec.is_some() && cfg.enforce_tofu { "ON" } else { "OFF" },
         if contact_log.is_some() { "ON" } else { "OFF" });
 
     {
@@ -455,6 +557,8 @@ mod tests {
         SecurityCtx {
             keyring: Arc::new(Mutex::new(Keyring::open_in_memory().unwrap())),
             sign_outbound: true,
+            enforce_tofu: true,
+            pending_rotation: None,
         }
     }
 
@@ -809,5 +913,231 @@ mod tests {
 
         // Unsigned bundle: still accepted (policy).
         assert!(secured_receive(&node_b, Some(&sec_b), &plain.encode()).unwrap().is_some());
+    }
+
+    // ---- Phase 17: MITM enforcement + signed key rotation ----
+
+    /// A peer whose hello key differs from the trusted key (an
+    /// impostor reusing the victim's EID) must fail the contact when
+    /// enforcement is on, and nothing may be stored.
+    #[test]
+    fn enforced_mitm_key_switch_fails_the_contact() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // The victim's previously trusted key for ipn:1.0.
+        let victim_old = dtn_identity::NodeIdentity::from_seed(1, [42u8; 32]);
+
+        let sec_b = Arc::new(sec_ctx());
+        {
+            let mut kr = sec_b.keyring.lock().unwrap();
+            kr.put("ipn:1.0", &victim_old.public_key()).unwrap();
+        }
+        let sec_b2 = sec_b.clone();
+
+        let server = std::thread::spawn(move || {
+            let node = Arc::new(Mutex::new(
+                Node::open(2, &PathBuf::from(":memory:"), Strategy::Epidemic).unwrap()));
+            let (mut stream, _) = listener.accept().unwrap();
+            exchange_counted(&node, Some(&sec_b2), &mut stream)
+        });
+
+        // The impostor: same EID, DIFFERENT key, no rotation proof.
+        let node_imp = Arc::new(Mutex::new(
+            Node::open(1, &PathBuf::from(":memory:"), Strategy::Epidemic).unwrap()));
+        node_imp.lock().unwrap().send(Eid::ipn(2, 0), b"i am the real node".to_vec(), 3600).unwrap();
+        let sec_imp = sec_ctx();
+
+        let mut stream = TcpStream::connect(addr).unwrap();
+        let imp_res = exchange_counted(&node_imp, Some(&sec_imp), &mut stream);
+        let b_res = server.join().unwrap();
+
+        assert!(b_res.is_err(), "B must reject the enforced key mismatch");
+        // The impostor either errors out or completes an empty contact
+        // after B hung up; what matters is that nothing was stored on
+        // B and the trusted key is untouched.
+        let _ = imp_res;
+        // B's keyring must still trust the OLD key.
+        let kr_b = sec_b.keyring.lock().unwrap();
+        assert_eq!(kr_b.get("ipn:1.0").unwrap().unwrap(), victim_old.public_key());
+    }
+
+    /// With enforcement off (legacy behavior) the same mismatch only
+    /// warns; the contact completes but the impostor's forged bundle
+    /// is still dropped by BIB verification against the OLD key.
+    #[test]
+    fn unenforced_mismatch_warns_and_still_drops_forgeries() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let victim_old = dtn_identity::NodeIdentity::from_seed(1, [42u8; 32]);
+        let sec_b = Arc::new(SecurityCtx {
+            keyring: Arc::new(Mutex::new(Keyring::open_in_memory().unwrap())),
+            sign_outbound: true,
+            enforce_tofu: false,
+            pending_rotation: None,
+        });
+        {
+            let mut kr = sec_b.keyring.lock().unwrap();
+            kr.put("ipn:1.0", &victim_old.public_key()).unwrap();
+        }
+        let sec_b2 = sec_b.clone();
+
+        let server = std::thread::spawn(move || {
+            let node = Arc::new(Mutex::new(
+                Node::open(2, &PathBuf::from(":memory:"), Strategy::Epidemic).unwrap()));
+            let (mut stream, _) = listener.accept().unwrap();
+            exchange_counted(&node, Some(&sec_b2), &mut stream)
+        });
+
+        let node_imp = Arc::new(Mutex::new(
+            Node::open(1, &PathBuf::from(":memory:"), Strategy::Epidemic).unwrap()));
+        node_imp.lock().unwrap().send(Eid::ipn(2, 0), b"forged payload".to_vec(), 3600).unwrap();
+        let sec_imp = sec_ctx();
+
+        let mut stream = TcpStream::connect(addr).unwrap();
+        let imp_res = exchange_counted(&node_imp, Some(&sec_imp), &mut stream);
+        let b_res = server.join().unwrap();
+
+        assert!(imp_res.is_ok(), "legacy (non-enforcing) mode completes the contact");
+        let (_, b_counts) = b_res.unwrap();
+        assert_eq!(b_counts.received, 0, "the impostor's bundle must be BIB-rejected");
+    }
+
+    /// A genuine rotation: the node presents its NEW key plus a
+    /// rotation announcement signed by the OLD (trusted) key. The
+    /// peer must accept the contact, update its keyring and store
+    /// the newly signed bundle.
+    #[test]
+    fn signed_rotation_is_accepted_and_applied() {
+        use ed25519_dalek::SigningKey;
+        use std::sync::mpsc;
+
+        let old = dtn_identity::NodeIdentity::from_seed(1, [42u8; 32]);
+        let new = dtn_identity::NodeIdentity::from_seed(1, [43u8; 32]);
+        assert_eq!(old.eid.as_uri(), new.eid.as_uri(), "same EID, new key");
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let sec_b = Arc::new(sec_ctx());
+        {
+            let mut kr = sec_b.keyring.lock().unwrap();
+            kr.put("ipn:1.0", &old.public_key()).unwrap();
+        }
+        let sec_b2 = sec_b.clone();
+
+        let (tx, rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let node = Arc::new(Mutex::new(
+                Node::open(2, &PathBuf::from(":memory:"), Strategy::Epidemic).unwrap()));
+            let (mut stream, _) = listener.accept().unwrap();
+            let res = exchange_counted(&node, Some(&sec_b2), &mut stream);
+            let inbox = node.lock().unwrap().inbox().unwrap();
+            tx.send((res, inbox)).unwrap();
+        });
+
+        // The rotating node: new identity, rotation signed by the old key.
+        let node_a = Arc::new(Mutex::new(
+            Node::open(1, &PathBuf::from(":memory:"), Strategy::Epidemic).unwrap()));
+        node_a.lock().unwrap().identity = new.clone();
+        let rotation = dtn_keyring::KeyChange::sign(
+            "ipn:1.0",
+            &SigningKey::from_bytes(&old.seed_bytes()),
+            &new.public_key(),
+            dtn_storage::now(),
+        );
+        let sec_a = SecurityCtx {
+            keyring: Arc::new(Mutex::new(Keyring::open_in_memory().unwrap())),
+            sign_outbound: true,
+            enforce_tofu: true,
+            pending_rotation: Some(rotation),
+        };
+        node_a.lock().unwrap().send(Eid::ipn(2, 0), b"signed by the new key".to_vec(), 3600).unwrap();
+
+        let mut stream = TcpStream::connect(addr).unwrap();
+        let (_, a_counts) = exchange_counted(&node_a, Some(&sec_a), &mut stream).unwrap();
+        assert_eq!(a_counts.sent, 1);
+
+        let (b_res, inbox) = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(b_res.is_ok(), "a validly signed rotation must not fail the contact");
+        assert_eq!(inbox.len(), 1, "the bundle signed by the NEW key must be stored");
+        let kr_b = sec_b.keyring.lock().unwrap();
+        assert_eq!(kr_b.get("ipn:1.0").unwrap().unwrap(), new.public_key(),
+            "the keyring must now trust the new key");
+        server.join().ok();
+    }
+
+    /// A rotation announcement signed by anything other than the
+    /// currently trusted key must fail an enforced contact.
+    #[test]
+    fn forged_rotation_is_rejected() {
+        use ed25519_dalek::SigningKey;
+
+        let old = dtn_identity::NodeIdentity::from_seed(1, [42u8; 32]);
+        let new = dtn_identity::NodeIdentity::from_seed(1, [43u8; 32]);
+        let attacker = dtn_identity::NodeIdentity::generate(77);
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let sec_b = Arc::new(sec_ctx());
+        {
+            let mut kr = sec_b.keyring.lock().unwrap();
+            kr.put("ipn:1.0", &old.public_key()).unwrap();
+        }
+        let sec_b2 = sec_b.clone();
+
+        let server = std::thread::spawn(move || {
+            let node = Arc::new(Mutex::new(
+                Node::open(2, &PathBuf::from(":memory:"), Strategy::Epidemic).unwrap()));
+            let (mut stream, _) = listener.accept().unwrap();
+            exchange_counted(&node, Some(&sec_b2), &mut stream)
+        });
+
+        let node_imp = Arc::new(Mutex::new(
+            Node::open(1, &PathBuf::from(":memory:"), Strategy::Epidemic).unwrap()));
+        node_imp.lock().unwrap().identity = new.clone();
+        // Signed by the ATTACKER's key, not the trusted old key.
+        let forged = dtn_keyring::KeyChange::sign(
+            "ipn:1.0",
+            &SigningKey::from_bytes(&attacker.seed_bytes()),
+            &new.public_key(),
+            dtn_storage::now(),
+        );
+        let sec_imp = SecurityCtx {
+            keyring: Arc::new(Mutex::new(Keyring::open_in_memory().unwrap())),
+            sign_outbound: true,
+            enforce_tofu: true,
+            pending_rotation: Some(forged),
+        };
+
+        let mut stream = TcpStream::connect(addr).unwrap();
+        let _imp_res = exchange_counted(&node_imp, Some(&sec_imp), &mut stream);
+        let b_res = server.join().unwrap();
+
+        assert!(b_res.is_err(), "a forged rotation must fail the enforced contact");
+        let kr_b = sec_b.keyring.lock().unwrap();
+        assert_eq!(kr_b.get("ipn:1.0").unwrap().unwrap(), old.public_key(),
+            "the trusted key must be untouched");
+    }
+
+    #[test]
+    fn strict_mode_drops_unknown_source_bundles() {
+        let node_b = Arc::new(Mutex::new(
+            Node::open(2, &PathBuf::from(":memory:"), Strategy::Epidemic).unwrap()));
+        let a = dtn_identity::NodeIdentity::generate(51);
+        let b = dtn_bpv7::Bundle::new(a.eid.clone(), Eid::ipn(2, 0), b"hi".to_vec(), 3600, 1, 1);
+        let signed = dtn_bpsec::sign_bundle(&b, &a);
+
+        // Strict TOFU mode (empty keyring): dropped.
+        let sec_strict = sec_ctx();
+        assert!(secured_receive(&node_b, Some(&sec_strict), &signed.encode()).unwrap().is_none(),
+            "strict mode must drop signed bundles from unknown sources");
+        assert_eq!(node_b.lock().unwrap().store.count().unwrap(), 0);
+
+        // Legacy mode still accepts them.
+        let sec_lenient = SecurityCtx { enforce_tofu: false, ..sec_ctx() };
+        assert!(secured_receive(&node_b, Some(&sec_lenient), &signed.encode()).unwrap().is_some());
     }
 }
