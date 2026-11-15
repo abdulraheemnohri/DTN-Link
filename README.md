@@ -9,7 +9,7 @@ without requiring a SIM card, cellular subscription or Wi-Fi router for every
 communication. It uses Bundle Protocol v7 (RFC 9171), store-carry-forward
 routing, modular physical transport adapters and optional internet gateways.
 
-## Status: Phases 1-12 + RFC 9173 security contexts + management + federation layers (core, transports, security, adapters, gateways, diagnostics, federation)
+## Status: Phases 1-12 + RFC 9173 security contexts + management + federation + app layer (core, transports, security, adapters, gateways, diagnostics, federation, apps)
 
 | Component | Status |
 |---|---|
@@ -31,11 +31,11 @@ routing, modular physical transport adapters and optional internet gateways.
 | Internet & satellite gateways (contact plans, pass windows) | implemented + tested (crates/dtn-gateway) |
 | Interop + performance benchmark suite | implemented + tested (crates/dtn-bench) |
 | Diagnostics: health reports + kind-tagged contact history with per-contact bundle counters (`dtn-link doctor`) | implemented + tested (crates/dtn-diagnostics) |
-| CLI | implemented — init/status/send/receive/bundles/forward/daemon/doctor/verify/keyring/encrypt/decrypt/decode/federation |
+| Platform app engine: contacts, conversations, unread tracking, poll inbox (`dtn-link chat`) | implemented + tested (crates/dtn-app) |
+| CLI | implemented — init/status/send/receive/bundles/chat/forward/daemon/doctor/verify/keyring/encrypt/decrypt/decode/federation |
 | RFC 9173 default contexts: BIB-HMAC-SHA2 (ctx 1), BCB-AES-GCM with primary-block AAD (ctx 2) | implemented + tested (crates/dtn-bpsec::rfc9173) |
 | Signed key rotation | future |
-| Bluetooth RFCOMM platform glue (stream layer ready) | next phase |
-| Android / iOS / Windows / Linux apps | Phases 7-9 |
+| Android / iOS / Windows / Linux UI shells (FFI/GUI on the dtn-app engine) | next phase |
 | Federation: region map, gateway plans, per-region security policy, sweeps over real gateway contacts, `dtn-link federation` CLI | implemented + tested (crates/dtn-federation) |
 
 ## Build
@@ -61,10 +61,19 @@ For LoRa TNC / serial radio hardware support:
     dtn-link bundles
     dtn-link doctor      # health report + contact history
 
+## Quick start: chat over DTN
+
+    dtn-link chat contacts add bob dtn://bob
+    dtn-link chat send bob "see you at the pass"
+    dtn-link chat poll        # after the daemons have synced
+    dtn-link chat list        # conversations with unread badges
+    dtn-link chat list bob    # one conversation, marks it read
+
 ## Architecture
 
 See [docs/architecture.md](docs/architecture.md),
-[docs/adapters.md](docs/adapters.md) and
+[docs/adapters.md](docs/adapters.md),
+[docs/apps.md](docs/apps.md) and
 [docs/diagnostics.md](docs/diagnostics.md).
 
 ## Standards
@@ -78,4 +87,3 @@ See [docs/architecture.md](docs/architecture.md),
 ## License
 
 MIT
-

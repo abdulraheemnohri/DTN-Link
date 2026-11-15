@@ -18,6 +18,7 @@ dtn-storage.workspace = true
 dtn-bpsec.workspace = true
 dtn-keyring.workspace = true
 dtn-diagnostics.workspace = true
+dtn-app.workspace = true
 dtn-federation.workspace = true
 dtn-gateway.workspace = true
 ed25519-dalek.workspace = true

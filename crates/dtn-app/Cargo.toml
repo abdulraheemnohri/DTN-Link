@@ -1,0 +1,12 @@
+[package]
+name = "dtn-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DTN-Link platform application layer: conversations, contacts and unread tracking over the node engine"
+
+[dependencies]
+dtn-bpv7.workspace = true
+dtn-core.workspace = true
+dtn-storage.workspace = true
+rusqlite.workspace = true

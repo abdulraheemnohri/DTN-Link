@@ -2,7 +2,7 @@
 
 ## Layered model (target)
 
-1. Application layer — messaging, files, alerts
+1. Application layer — messaging, files, alerts [messaging implemented — dtn-app (Phase 18); files/alerts future]
 2. Identity layer — Ed25519 node identities [implemented]
 3. Bundle layer — BPv7 (RFC 9171) creation/validation [implemented]
 4. Security layer — BPSec (RFC 9172) [BIB + BCB implemented, RFC 9173 contexts BIB-HMAC-SHA2 / BCB-AES-GCM]
@@ -13,13 +13,15 @@
 9. Management layer — monitoring, diagnostics, configuration [implemented — dtn-diagnostics (health reports + contact log)]
 10. Federation layer — inter-region routing via gateway peers [implemented — dtn-federation (Phase 14)]
 
-## Current implementation (Phases 1-14)
+## Current implementation (Phases 1-18)
 
 ```
 +--------------------------------------------------------+
-| cli: init/status/send/receive/bundles/forward/daemon/   |
-|     doctor/verify/decode                                |
+| cli: init/status/send/receive/bundles/chat/forward/     |
+|     daemon/doctor/verify/decode                         |
 +--------------------------------------------------------+
+| dtn-app: contacts, conversations, unread tracking,      |
+|   poll-based inbox (Phase 18 application layer)         |
 | dtn-daemon: contacts with sign/verify + TOFU key learn |
 |   + MITM enforcement + signed key rotation (Phase 17)   |
 |   + contact-outcome logging (dtn-diagnostics)           |
@@ -271,6 +273,32 @@ and the `dtn-link federation show/route/sweep` CLI commands. Honest
 scope: the receiving gateway forwards with its own routing engine
 (policy only, no topology database).
 
+### Platform application layer (Phase 18)
+
+dtn-app is the embeddable messaging-app engine that platform
+frontends (Android, iOS, desktop) build on. It sits on the node
+engine and persists app state in a sidecar SQLite database
+(`<node-db>.app`):
+
+- **Contacts** — alias → EID URI (add/update, resolve, list).
+- **Conversations** — per-peer message threads with direction (in/out),
+  body, timestamp, read state and the carrying bundle's identity key
+  for status correlation.
+- **Unread tracking** — per-conversation and total counters plus
+  mark-read per peer (the notification-badge data).
+- **Poll-based inbox** — `App::poll_inbox()` drains the node engine's
+  pending inbox into conversation rows and marks the consumed bundles
+  delivered in the store; idempotent (dedup + delivered flag).
+- **Text rendering** — conversation list and history renderers used by
+  the `dtn-link chat` CLI (contacts add/list, send <alias|eid>, poll,
+  list [peer]).
+
+The node engine keeps store-carry-forward, dedup, expiry and BPSec;
+`send_text()` hands the message to the engine as a bundle that waits
+in the store for the next contact. See docs/apps.md. Honest scope:
+this is the shared engine, not the platform UI shells — FFI bindings,
+GUI toolkits, attachments and remote read receipts are future work.
+
 ## Roadmap
 
 - Phases 5-6, 8 security (done): BIB integrity, BCB confidentiality, keyring trust store, secured contacts with TOFU key learning.
@@ -278,10 +306,10 @@ scope: the receiving gateway forwards with its own routing engine
 - Done: Phase 17 MITM enforcement + signed key rotation — TOFU classification (New/Match/Mismatch), enforced hello-key mismatch (contact fails, nothing stored), KeyChange announcements signed by the previously trusted key applied via Keyring::rotate, strict-mode dropping of unknown-source signed bundles, `--no-enforce-tofu` opt-out.
 - Done: Wi-Fi Direct platform glue — GroupOwner listener + member contacts with retry (dtn-transport::wifi_direct).
 - Done: Bluetooth RFCOMM glue — dtn-transport::bluetooth (contact_stream + retry; feature-gated OS SPP serial opening).
-- Phases 7-9: platform apps.
 - Done: serial/LoRa adapters (feature-gated serial + KISS framing).
 - Done: Phase 12 interop + performance testing — dtn-bench (live codec/store/contact benchmarks over real transports: duplex length-prefix + KISS, loopback TCP, TCPCLv4 sessions; cross-layer interop tests including signed + encrypted bundles over KISS; docs/benchmarks.md).
 - Done: management/diagnostics layer — dtn-diagnostics (HealthReport + ContactLog, dtn-link doctor, daemon contact recording; docs/diagnostics.md).
 - Done: federation layer — dtn-federation (RegionMap, gateway plan, route_to policy, sweep over real gateway contacts; docs/federation.md).
 - Done: Phase 15 management completion — per-contact bundle counters (exchange_counted / exchange_v4_counted), kind-tagged contact log (peer/gateway/federation) with in-place migration of older databases, gateway + federation contact logging, per-region security policies (require-signed blocks plaintext sweeps) and the dtn-link federation show/route/sweep CLI.
-- Next: platform apps (Phases 7-9); later: TLS (RFC 9174 §4.4), web-of-trust, TLE-driven pass prediction, a network-wide management plane.
+- Done: Phase 18 platform application layer — dtn-app (contacts, conversations, unread tracking, poll-based inbox, text renderers) + the dtn-link chat CLI (docs/apps.md).
+- Next: platform UI shells on the dtn-app engine (FFI bindings, GUI toolkits, mobile packaging); later: attachments, remote read receipts, TLS (RFC 9174 §4.4), web-of-trust, TLE-driven pass prediction, a network-wide management plane.

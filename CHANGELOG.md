@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.17.0 (2026-11-15)
+
+Phase 18 — platform application layer (Phases 7-9 foundation).
+
+- dtn-app (new crate): the embeddable messaging-app engine that
+  platform frontends (Android, iOS, Windows, Linux, macOS) build on.
+  It sits on the dtn-core node engine and persists app state in a
+  sidecar SQLite database (`<node-db>.app`):
+  - Contacts — human aliases mapped to EID URIs (add/update with
+    ON CONFLICT re-pointing, resolve, list).
+  - Conversations — per-peer message threads with direction (in/out),
+    body, timestamp, read state and the carrying bundle's identity
+    key for status correlation.
+  - Unread tracking — per-conversation and total unread counters plus
+    mark_read per peer (idempotent), the notification-badge data.
+  - Poll-based inbox — App::poll_inbox() drains the node engine's
+    pending inbox into conversation rows and marks the consumed
+    bundles delivered in the bundle store; idempotent across polls
+    (node-engine dedup + delivered flag). Non-UTF-8 payloads are
+    recorded lossily instead of dropped.
+  - Text renderers — render_conversations / render_history for text
+    frontends (unread badges, per-message [you]/[them] lines).
+- cli: new `dtn-link chat` command group — chat contacts add/list,
+  chat send <alias|eid> <message> [lifetime] (aliases resolved from
+  the contact table, raw dtn:// and ipn: URIs accepted), chat poll
+  (prints new messages + unread total) and chat list [alias|eid]
+  (conversation list with unread badges, or one conversation which is
+  marked read). Usage text + version string updated (0.17.0).
+- 10 new tests: outbox recording with bundle keys, two-node delivery
+  with unread counting over the real node engine, reply flow +
+  idempotent mark-read, contact alias resolution and re-pointing,
+  conversation-list ordering by activity, app-state persistence across
+  reopen (messages + contacts), text renderings, direction round-trip,
+  lossy non-UTF-8 payloads, and poll idempotency.
+- docs: new docs/apps.md (engine guide, CLI walkthrough, embedding
+  example, honest scope); architecture.md marks the application layer
+  implemented (Phase 18) and updates the roadmap; README status table
+  gains the app engine + chat CLI rows; workspace bumped to 0.17.0.
+- Honest scope: this is the shared engine, not the platform UI shells
+  — FFI bindings, GUI toolkits, mobile packaging, attachments and
+  remote read receipts are future work.
+
+
 ## 0.16.0 (2026-11-14)
 
 Phase 17 — MITM enforcement + signed key rotation.
@@ -47,7 +90,6 @@ Phase 17 — MITM enforcement + signed key rotation.
   on >= 0.16 (announcing to an older peer degrades that one contact);
   web-of-trust and operator-confirmed key pinning remain future work;
   TLS (RFC 9174 §4.4) unchanged.
-
 
 ## 0.15.0 (2026-11-13)
 

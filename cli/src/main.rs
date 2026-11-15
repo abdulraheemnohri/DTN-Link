@@ -1,4 +1,4 @@
-//! dtn-link CLI (Phases 1-8 + management + federation + MITM hardening).
+//! dtn-link CLI (Phases 1-8 + management + federation + app layer).
 
 use dtn_bpv7::{Bundle, Eid};
 use dtn_core::Node;
@@ -37,6 +37,15 @@ fn strategy_from(s: Option<&str>) -> Strategy {
         Some("opportunistic") => Strategy::Opportunistic,
         _ => Strategy::Epidemic,
     }
+}
+
+/// Resolve a chat destination: a saved contact alias or a raw EID URI
+/// (dtn://name or ipn:N.S).
+fn chat_dest(app: &dtn_app::App, s: &str) -> Eid {
+    if let Some(eid_uri) = app.db.resolve_alias(s).expect("contact lookup") {
+        return parse_cli_eid(&eid_uri);
+    }
+    parse_cli_eid(s)
 }
 
 fn main() {
@@ -130,6 +139,118 @@ fn main() {
                     b.primary.creation_ts.1,
                     b.payload().map(<[u8]>::len).unwrap_or(0)
                 );
+            }
+        }
+        Some("chat") => {
+            // usage:
+            //   dtn-link chat contacts add <alias> <eid-uri>
+            //   dtn-link chat contacts list
+            //   dtn-link chat send <alias|eid> <message> [lifetime]
+            //   dtn-link chat poll
+            //   dtn-link chat list [alias|eid]
+            let sub = args.get(1).map(String::as_str);
+            match sub {
+                Some("contacts") => match args.get(2).map(String::as_str) {
+                    Some("add") => {
+                        let (alias, eid) = match (args.get(3), args.get(4)) {
+                            (Some(a), Some(e)) => (a.clone(), e.clone()),
+                            _ => {
+                                eprintln!("usage: dtn-link chat contacts add <alias> <eid-uri>");
+                                std::process::exit(2);
+                            }
+                        };
+                        let mut app = dtn_app::App::open(1, &db_path(), Strategy::Epidemic)
+                            .expect("failed to open app");
+                        let fresh = app.db.add_contact(&alias, &eid).expect("add contact");
+                        println!(
+                            "{}",
+                            if fresh {
+                                format!("Contact '{alias}' -> {eid}")
+                            } else {
+                                format!("Contact '{alias}' re-pointed to {eid}")
+                            }
+                        );
+                    }
+                    Some("list") => {
+                        let app = dtn_app::App::open(1, &db_path(), Strategy::Epidemic)
+                            .expect("failed to open app");
+                        let contacts = app.db.list_contacts().expect("list contacts");
+                        if contacts.is_empty() {
+                            println!("No contacts. Add one: dtn-link chat contacts add <alias> <eid-uri>");
+                        }
+                        for c in contacts {
+                            println!("{:<16} {}", c.alias, c.eid);
+                        }
+                    }
+                    _ => {
+                        eprintln!("usage: dtn-link chat contacts add <alias> <eid-uri> | list");
+                        std::process::exit(2);
+                    }
+                },
+                Some("send") => {
+                    if args.len() < 4 {
+                        eprintln!("usage: dtn-link chat send <alias|eid> <message> [lifetime]");
+                        std::process::exit(2);
+                    }
+                    let lifetime: u64 = if args.len() > 4 {
+                        args.last().and_then(|s| s.parse::<u64>().ok()).unwrap_or(3600)
+                    } else {
+                        3600
+                    };
+                    // The message is everything between the destination
+                    // and the optional trailing lifetime number.
+                    let text_len = if args.len() > 4
+                        && args.last().and_then(|s| s.parse::<u64>().ok()).is_some()
+                    {
+                        args.len() - 1
+                    } else {
+                        args.len()
+                    };
+                    let text = args[3..text_len].join(" ");
+                    let mut app = dtn_app::App::open(1, &db_path(), Strategy::Epidemic)
+                        .expect("failed to open app");
+                    let dest = chat_dest(&app, &args[2]);
+                    let m = app
+                        .send_text(&dest, &text, lifetime)
+                        .expect("chat send failed");
+                    println!("Queued for {} (bundle seq key {})", m.peer, m.bundle_key.unwrap_or_default());
+                    println!("The daemon/gateway/adapter carries it on the next contact (DTN store-carry-forward).");
+                }
+                Some("poll") => {
+                    let mut app = dtn_app::App::open(1, &db_path(), Strategy::Epidemic)
+                        .expect("failed to open app");
+                    let new = app.poll_inbox().expect("poll failed");
+                    if new.is_empty() {
+                        println!("No new messages.");
+                    }
+                    for m in new {
+                        println!("From {}: {}", m.peer, m.body);
+                    }
+                    let unread = app.unread_total().expect("unread");
+                    if unread > 0 {
+                        println!("({unread} unread — open with: dtn-link chat list <peer>)");
+                    }
+                }
+                Some("list") => {
+                    let mut app = dtn_app::App::open(1, &db_path(), Strategy::Epidemic)
+                        .expect("failed to open app");
+                    match args.get(2) {
+                        Some(peer_ref) => {
+                            let peer = chat_dest(&app, peer_ref).as_uri();
+                            print!("{}", app.render_history(&peer).expect("history"));
+                            app.mark_read(&peer).expect("mark read");
+                        }
+                        None => {
+                            print!("{}", app.render_conversations().expect("conversations"));
+                        }
+                    }
+                }
+                _ => {
+                    eprintln!(
+                        "usage:\n  dtn-link chat contacts add <alias> <eid-uri>\n  dtn-link chat contacts list\n  dtn-link chat send <alias|eid> <message> [lifetime]\n  dtn-link chat poll\n  dtn-link chat list [alias|eid]"
+                    );
+                    std::process::exit(2);
+                }
             }
         }
         Some("forward") => {
@@ -509,7 +630,7 @@ fn main() {
                 }
             }
         }
-        Some("version") => println!("dtn-link 0.16.0 (BPv7, TCPCLv4, BPSec, gateways, federation, diagnostics, TOFU enforcement)"),
+        Some("version") => println!("dtn-link 0.17.0 (BPv7, TCPCLv4, BPSec, gateways, federation, diagnostics, app layer)"),
         _ => {
             eprintln!(
                 "dtn-link — decentralized DTN communication
@@ -520,6 +641,11 @@ usage:
   dtn-link send <dtn://dest> <message> [lifetime-seconds]
   dtn-link receive        (bundle bytes on stdin)
   dtn-link bundles
+  dtn-link chat contacts add <alias> <eid-uri>
+  dtn-link chat contacts list
+  dtn-link chat send <alias|eid> <message> [lifetime-seconds]
+  dtn-link chat poll
+  dtn-link chat list [alias|eid]
   dtn-link forward <dtn://peer> [strategy]
   dtn-link daemon --listen 0.0.0.0:4556 [--peers host:port,...] [--strategy epidemic|spray|opportunistic] [--interval 30] [--no-enforce-tofu] [--insecure]
   dtn-link verify <pubkey-hex>   (bundle bytes on stdin)
@@ -549,7 +675,6 @@ fn hex_to_32(s: &str) -> Option<[u8; 32]> {
     }
     Some(out)
 }
-
 
 fn parse_cli_eid(s: &str) -> Eid {
     if let Some(rest) = s.strip_prefix("ipn:") {
