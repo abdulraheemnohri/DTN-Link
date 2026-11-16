@@ -1,0 +1,15 @@
+[package]
+name = "dtn-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DTN-Link C ABI (FFI) over the dtn-app engine for platform UI shells (Android/iOS/Windows/Linux/macOS)"
+
+[lib]
+name = "dtn_ffi"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+dtn-app.workspace = true
+dtn-bpv7.workspace = true
+dtn-core.workspace = true

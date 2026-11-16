@@ -630,7 +630,7 @@ fn main() {
                 }
             }
         }
-        Some("version") => println!("dtn-link 0.17.0 (BPv7, TCPCLv4, BPSec, gateways, federation, diagnostics, app layer)"),
+        Some("version") => println!("dtn-link 0.18.0 (BPv7, TCPCLv4, BPSec, gateways, federation, diagnostics, app layer, FFI)"),
         _ => {
             eprintln!(
                 "dtn-link — decentralized DTN communication

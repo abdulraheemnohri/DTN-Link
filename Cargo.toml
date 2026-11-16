@@ -16,11 +16,12 @@ members = [
     "crates/dtn-bench",
     "crates/dtn-diagnostics",
     "crates/dtn-app",
+    "crates/dtn-ffi",
     "cli",
 ]
 
 [workspace.package]
-version = "0.17.0"
+version = "0.18.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/abdulraheemnohri/DTN-Link"
@@ -41,6 +42,7 @@ dtn-federation = { path = "crates/dtn-federation" }
 dtn-bench = { path = "crates/dtn-bench" }
 dtn-diagnostics = { path = "crates/dtn-diagnostics" }
 dtn-app = { path = "crates/dtn-app" }
+dtn-ffi = { path = "crates/dtn-ffi" }
 ed25519-dalek = "2"
 aes-gcm = "0.10"
 rand = "0.8"

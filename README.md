@@ -9,7 +9,7 @@ without requiring a SIM card, cellular subscription or Wi-Fi router for every
 communication. It uses Bundle Protocol v7 (RFC 9171), store-carry-forward
 routing, modular physical transport adapters and optional internet gateways.
 
-## Status: Phases 1-12 + RFC 9173 security contexts + management + federation + app layer (core, transports, security, adapters, gateways, diagnostics, federation, apps)
+## Status: Phases 1-12 + RFC 9173 security contexts + management + federation + app layer + FFI (core, transports, security, adapters, gateways, diagnostics, federation, apps, ffi)
 
 | Component | Status |
 |---|---|
@@ -32,10 +32,11 @@ routing, modular physical transport adapters and optional internet gateways.
 | Interop + performance benchmark suite | implemented + tested (crates/dtn-bench) |
 | Diagnostics: health reports + kind-tagged contact history with per-contact bundle counters (`dtn-link doctor`) | implemented + tested (crates/dtn-diagnostics) |
 | Platform app engine: contacts, conversations, unread tracking, poll inbox (`dtn-link chat`) | implemented + tested (crates/dtn-app) |
+| C ABI / FFI over the app engine for platform UI shells (`libdtn_ffi` + `dtn_app_ffi.h`) | implemented + tested (crates/dtn-ffi) |
 | CLI | implemented — init/status/send/receive/bundles/chat/forward/daemon/doctor/verify/keyring/encrypt/decrypt/decode/federation |
 | RFC 9173 default contexts: BIB-HMAC-SHA2 (ctx 1), BCB-AES-GCM with primary-block AAD (ctx 2) | implemented + tested (crates/dtn-bpsec::rfc9173) |
-| Signed key rotation | future |
-| Android / iOS / Windows / Linux UI shells (FFI/GUI on the dtn-app engine) | next phase |
+| Signed key rotation (TOFU + signed KeyChange announcements) | implemented + tested (crates/dtn-keyring, dtn-daemon) |
+| Android / iOS / Windows / Linux GUI shells on the dtn-ffi C ABI | next phase |
 | Federation: region map, gateway plans, per-region security policy, sweeps over real gateway contacts, `dtn-link federation` CLI | implemented + tested (crates/dtn-federation) |
 
 ## Build
@@ -49,6 +50,10 @@ Requires Rust 1.70+.
 For LoRa TNC / serial radio hardware support:
 
     cargo build -p dtn-transport --features serial
+
+For the platform FFI library (Android/iOS/desktop UI shells):
+
+    cargo build -p dtn-ffi --release   # libdtn_ffi + include/dtn_app_ffi.h
 
 ## Quick start: two real nodes over TCP
 
@@ -73,7 +78,8 @@ For LoRa TNC / serial radio hardware support:
 
 See [docs/architecture.md](docs/architecture.md),
 [docs/adapters.md](docs/adapters.md),
-[docs/apps.md](docs/apps.md) and
+[docs/apps.md](docs/apps.md),
+[docs/ffi.md](docs/ffi.md) and
 [docs/diagnostics.md](docs/diagnostics.md).
 
 ## Standards

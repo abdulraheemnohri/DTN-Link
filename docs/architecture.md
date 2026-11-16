@@ -12,14 +12,17 @@
 8. Gateway layer — internet/satellite gateways [implemented — dtn-gateway (Phase 11)]
 9. Management layer — monitoring, diagnostics, configuration [implemented — dtn-diagnostics (health reports + contact log)]
 10. Federation layer — inter-region routing via gateway peers [implemented — dtn-federation (Phase 14)]
+11. Platform shell boundary — C ABI over the application layer [implemented — dtn-ffi (Phase 19)]
 
-## Current implementation (Phases 1-18)
+## Current implementation (Phases 1-19)
 
 ```
 +--------------------------------------------------------+
 | cli: init/status/send/receive/bundles/chat/forward/     |
 |     daemon/doctor/verify/decode                         |
 +--------------------------------------------------------+
+| dtn-ffi: C ABI over the app engine for platform         |
+|   UI shells (libdtn_ffi + dtn_app_ffi.h, Phase 19)      |
 | dtn-app: contacts, conversations, unread tracking,      |
 |   poll-based inbox (Phase 18 application layer)         |
 | dtn-daemon: contacts with sign/verify + TOFU key learn |
@@ -296,8 +299,33 @@ engine and persists app state in a sidecar SQLite database
 The node engine keeps store-carry-forward, dedup, expiry and BPSec;
 `send_text()` hands the message to the engine as a bundle that waits
 in the store for the next contact. See docs/apps.md. Honest scope:
-this is the shared engine, not the platform UI shells — FFI bindings,
-GUI toolkits, attachments and remote read receipts are future work.
+this is the shared engine, not the platform UI shells — GUI toolkits,
+attachments and remote read receipts are future work.
+
+### FFI boundary (Phase 19)
+
+dtn-ffi exposes the dtn-app engine through a plain C ABI
+(`libdtn_ffi` + `include/dtn_app_ffi.h`), the stable boundary that
+Android (JNI), iOS (Swift bridge) and desktop shells compile
+against:
+
+- **Lifecycle** — `dtn_app_open(node_number, db_path, strategy)` /
+  `dtn_app_close` over an opaque handle (internally `Mutex<App>`,
+  so any entry point is callable from any thread).
+- **Messaging** — `dtn_app_send` (dtn://, ipn:, dtn:none or bare-name
+  EIDs), `dtn_app_poll_inbox`, `dtn_app_conversations`,
+  `dtn_app_history` (JSON arrays via an internal escaper — no new
+  dependencies), `dtn_app_unread_total`, `dtn_app_mark_read`.
+- **Contacts** — `dtn_app_add_contact`, `dtn_app_resolve_contact`.
+- **Error protocol** — every fallible entry point returns -1/NULL and
+  records a thread-local message retrievable via
+  `dtn_app_last_error`; NULL arguments are reported as errors, never
+  dereferenced; returned strings are freed with `dtn_string_free`.
+
+Tests drive the C ABI functions directly, including a full two-node
+chat with delivery through the real node engine. See docs/ffi.md.
+Honest scope: the FFI covers the chat/app engine surface; GUI
+toolkits and mobile packaging are future work.
 
 ## Roadmap
 
@@ -312,4 +340,5 @@ GUI toolkits, attachments and remote read receipts are future work.
 - Done: federation layer — dtn-federation (RegionMap, gateway plan, route_to policy, sweep over real gateway contacts; docs/federation.md).
 - Done: Phase 15 management completion — per-contact bundle counters (exchange_counted / exchange_v4_counted), kind-tagged contact log (peer/gateway/federation) with in-place migration of older databases, gateway + federation contact logging, per-region security policies (require-signed blocks plaintext sweeps) and the dtn-link federation show/route/sweep CLI.
 - Done: Phase 18 platform application layer — dtn-app (contacts, conversations, unread tracking, poll-based inbox, text renderers) + the dtn-link chat CLI (docs/apps.md).
-- Next: platform UI shells on the dtn-app engine (FFI bindings, GUI toolkits, mobile packaging); later: attachments, remote read receipts, TLS (RFC 9174 §4.4), web-of-trust, TLE-driven pass prediction, a network-wide management plane.
+- Done: Phase 19 FFI boundary — dtn-ffi C ABI over the app engine (lifecycle, send/poll/conversations/history/unread/contacts, thread-local error protocol, JSON emission, dtn_app_ffi.h header; docs/ffi.md).
+- Next: platform GUI shells (Android/iOS/desktop) on the dtn-ffi C ABI; later: attachments, remote read receipts, TLS (RFC 9174 §4.4), web-of-trust, TLE-driven pass prediction, a network-wide management plane.

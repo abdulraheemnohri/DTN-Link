@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.18.0 (2026-11-16)
+
+Phase 19 — the C ABI / FFI boundary for the platform UI shells.
+
+- dtn-ffi (new crate): a plain C ABI over the dtn-app messaging
+  engine, the stable boundary Android (JNI), iOS (Swift bridge) and
+  Windows/Linux/macOS shells compile against. Crate type
+  cdylib + rlib; ships `include/dtn_app_ffi.h`.
+  - Lifecycle: `dtn_app_open(node_number, db_path, strategy)` /
+    `dtn_app_close` over an opaque handle (internally `Mutex<App>`,
+    so any entry point is callable from any thread; calls serialize).
+  - Messaging: `dtn_app_send` (EID URI, `ipn:n.s`, `dtn:none` or bare
+    node name accepted; the bundle is queued in the node store),
+    `dtn_app_poll_inbox` (drains the real node inbox into
+    conversations, marks consumed bundles delivered, idempotent),
+    `dtn_app_conversations` / `dtn_app_history` (JSON arrays),
+    `dtn_app_unread_total` / `dtn_app_mark_read` (badge data).
+  - Contacts: `dtn_app_add_contact` (1 = created, 0 = updated)
+    and `dtn_app_resolve_contact`.
+  - Error protocol: every fallible entry point returns -1/NULL and
+    records a thread-local message retrievable via
+    `dtn_app_last_error`; NULL handle/string arguments are reported
+    as errors, never dereferenced. Returned strings are released with
+    `dtn_string_free` (the last-error pointer is library-owned).
+  - JSON is emitted by a small internal escaper (quotes, backslash,
+    control characters as \uXXXX) — no new dependencies.
+- 7 new tests, all exercising the C ABI functions directly: EID-URI
+  parsing (dtn/ipn/bare/null/invalid forms), JSON escaping, a full
+  two-node chat over the C ABI with delivery through the real node
+  engine (send → wire carry → poll → unread → conversations →
+  mark-read idempotency → empty second poll), contact add/resolve with
+  unknown-alias error reporting, bare-name send + invalid-URI
+  rejection, the NULL-handle/NULL-string error protocol (no crashes),
+  bad-database-path failure, and unknown-strategy fallback to
+  epidemic.
+- docs: new docs/ffi.md (platform table, build artifacts, calling
+  convention, JSON shapes, minimal C usage, honest scope); README
+  status table gains the FFI row, corrects signed key rotation to
+  implemented (Phase 17) and re-scopes the GUI-shell row to
+  "next phase (FFI implemented)"; workspace bumped to 0.18.0.
+- Honest scope: the FFI covers the chat/app engine surface. GUI
+  toolkits, mobile packaging (Gradle/Xcode), attachments and remote
+  read receipts are future work; this crate is the stable boundary
+  they build on.
+
+
 ## 0.17.0 (2026-11-15)
 
 Phase 18 — platform application layer (Phases 7-9 foundation).
