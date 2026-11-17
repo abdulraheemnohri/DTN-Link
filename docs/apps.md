@@ -70,8 +70,9 @@ for m in app.poll_inbox()? {
 println!("unread: {}", app.unread_total()?);
 ```
 
-Platform UI shells (FFI bindings, GUI toolkits, mobile packaging) are
-the next milestone; this crate is the engine they will bind to.
+Platform UI shells build on this crate through the Phase 19 FFI
+boundary (`dtn-ffi`). The desktop terminal shell `dtn-shell`
+(Phase 20, shells/desktop) is the first of them; see docs/shell.md.
 
 ## Honest scope
 
@@ -82,3 +83,4 @@ the next milestone; this crate is the engine they will bind to.
   delivery acknowledgments back to the sender yet.
 - The app database is local to one node; there is no conversation
   sync between a user's own devices yet.
+

@@ -12,9 +12,9 @@
 8. Gateway layer — internet/satellite gateways [implemented — dtn-gateway (Phase 11)]
 9. Management layer — monitoring, diagnostics, configuration [implemented — dtn-diagnostics (health reports + contact log)]
 10. Federation layer — inter-region routing via gateway peers [implemented — dtn-federation (Phase 14)]
-11. Platform shell boundary — C ABI over the application layer [implemented — dtn-ffi (Phase 19)]
+11. Platform shell boundary — C ABI over the application layer [implemented — dtn-ffi (Phase 19); desktop shell dtn-shell (Phase 20)]
 
-## Current implementation (Phases 1-19)
+## Current implementation (Phases 1-20)
 
 ```
 +--------------------------------------------------------+
@@ -327,6 +327,32 @@ chat with delivery through the real node engine. See docs/ffi.md.
 Honest scope: the FFI covers the chat/app engine surface; GUI
 toolkits and mobile packaging are future work.
 
+### Desktop shell (Phase 20)
+
+`shells/desktop/dtn-shell` is the first consumer of the FFI
+boundary: a dependency-free POSIX C11 terminal chat that links
+against the real `libdtn_ffi` and drives the full ABI surface —
+
+- startup: `dtn_app_open` + `dtn_app_eid` + an offline catch-up
+  `dtn_app_poll_inbox`;
+- `/list`, `/chat` (history), `/msg` (send), `/add`, `/read`,
+  `/unread`, `/poll`, `/me` — aliases resolved through
+  `dtn_app_resolve_contact`, raw dtn:// / ipn: / bare-name EIDs
+  accepted by `dtn_app_send`;
+- `shells/desktop/json.c` — a small reader for exactly the flat JSON
+  array shapes dtn-ffi emits (full-escape decoding incl. \uXXXX
+  surrogate pairs); malformed input fails closed.
+
+`make -C shells/desktop test` runs `dtn-ffi-selftest`, which walks
+the ABI end to end against the real library: NULL-argument error
+protocol (no crashes), lifecycle + EIDs, contacts (created / updated
+/ unknown alias), send by EID and by alias, invalid-URI rejection,
+conversation/unread state, poll idempotency, close/free no-ops, and
+persistence across reopen. See docs/shell.md. Honest scope: outbound
+flow + storage are exercised from C; inbound delivery stays covered
+by the Rust-side dtn-ffi tests. Android (JNI) and iOS shells are the
+remaining platform work on the same ABI.
+
 ## Roadmap
 
 - Phases 5-6, 8 security (done): BIB integrity, BCB confidentiality, keyring trust store, secured contacts with TOFU key learning.
@@ -341,4 +367,6 @@ toolkits and mobile packaging are future work.
 - Done: Phase 15 management completion — per-contact bundle counters (exchange_counted / exchange_v4_counted), kind-tagged contact log (peer/gateway/federation) with in-place migration of older databases, gateway + federation contact logging, per-region security policies (require-signed blocks plaintext sweeps) and the dtn-link federation show/route/sweep CLI.
 - Done: Phase 18 platform application layer — dtn-app (contacts, conversations, unread tracking, poll-based inbox, text renderers) + the dtn-link chat CLI (docs/apps.md).
 - Done: Phase 19 FFI boundary — dtn-ffi C ABI over the app engine (lifecycle, send/poll/conversations/history/unread/contacts, thread-local error protocol, JSON emission, dtn_app_ffi.h header; docs/ffi.md).
-- Next: platform GUI shells (Android/iOS/desktop) on the dtn-ffi C ABI; later: attachments, remote read receipts, TLS (RFC 9174 §4.4), web-of-trust, TLE-driven pass prediction, a network-wide management plane.
+- Done: Phase 20 desktop shell — shells/desktop/dtn-shell (POSIX C11, dependency-free) drives the full dtn-ffi C ABI over the real libdtn_ffi (lifecycle, contacts, send, conversations/history, unread, poll), a flat-JSON reader for the FFI shapes, and make test running dtn-ffi-selftest end-to-end against the built library (docs/shell.md).
+- Next: Android (JNI) and iOS (Swift bridge) GUI shells on the same dtn-ffi C ABI; later: attachments, remote read receipts, TLS (RFC 9174 §4.4), web-of-trust, TLE-driven pass prediction, a network-wide management plane.
+

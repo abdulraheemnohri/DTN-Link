@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.19.0 (2026-11-17)
+
+Phase 20 — the first platform UI shell: the desktop C shell on the FFI boundary.
+
+- shells/desktop (new): `dtn-shell`, a dependency-free interactive
+  POSIX C11 terminal chat that embeds the dtn-app engine through the
+  real `libdtn_ffi` C ABI — no Rust, no new crates, the exact ABI from
+  `dtn_app_ffi.h`:
+  - Lifecycle + identity on startup (`dtn_app_open` / `dtn_app_eid`),
+    offline catch-up poll of delivered bundles.
+  - Commands: /me, /list, /chat (open a conversation, prints history),
+    /back, /msg, /add, /read, /unread, /poll, /quit; inside a
+    conversation a bare line sends. Aliases resolve via
+    `dtn_app_resolve_contact`; raw dtn://, ipn:, dtn:none and bare
+    node names are accepted directly.
+  - Messages leave through `dtn_app_send` as real BPv7 bundles in the
+    real SQLite store and are carried out by daemon/gateway/adapter
+    contacts; delivery returns through `dtn_app_poll_inbox` with
+    unread badges from `dtn_app_conversations`.
+  - `json.c`: a small reader for exactly the flat JSON array shapes
+    dtn-ffi emits (full string-escape decoding incl. \uXXXX surrogate
+    pairs); malformed input fails closed, never crashes.
+- shells/desktop/dtn_ffi_selftest.c + Makefile: `make test` builds
+  against the real `target/release/libdtn_ffi.so`(-.dylib) and walks
+  the ABI end to end — NULL-argument error protocol (no crashes),
+  lifecycle + EIDs, contacts (created/updated/unknown alias), send by
+  EID and by alias, invalid-URI rejection, conversation/unread state,
+  poll idempotency, close/free no-ops, and persistence across reopen.
+  Exit != 0 on any failed check.
+- docs: new docs/shell.md (build/run, command-to-FFI mapping, self-test
+  inventory, honest scope); shells/desktop README; README status table
+  gains the desktop-shell row; architecture.md marks Phase 20
+  (layer 11 now has a working consumer) and updates the roadmap;
+  docs/apps.md + docs/ffi.md point to the shell as the reference FFI
+  consumer; workspace bumped to 0.19.0.
+- Honest scope: this is the desktop/terminal shell. Android (JNI) and
+  iOS (Swift bridge) shells, GUI toolkits, attachments and remote read
+  receipts remain future work on the same ABI. Inbound delivery is
+  covered by the Rust-side dtn-ffi tests (the ABI alone cannot carry a
+  live bundle between two engines).
+
+
 ## 0.18.0 (2026-11-16)
 
 Phase 19 — the C ABI / FFI boundary for the platform UI shells.
@@ -529,3 +571,4 @@ Phases 2-4 — multi-hop forwarding, hybrid routing, TCP transport.
 
 Phase 1 — Rust core foundation (BPv7 CBOR, identity, SQLite store, node
 engine, CLI, CI).
+

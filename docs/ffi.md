@@ -1,13 +1,15 @@
 # FFI: the platform shell boundary (Phase 19)
 
 `crates/dtn-ffi` exposes the `dtn-app` messaging engine through a plain
-C ABI so platform frontends can embed DTN-Link without touching Rust:
+C ABI so platform frontends can embed DTN-Link without touching Rust.
+The first consumer is the desktop terminal shell `dtn-shell`
+(Phase 20, shells/desktop; docs/shell.md):
 
 | Platform | How it consumes the FFI |
 |---|---|
-| Android | JNI wrapper over `libdtn_ffi.so` (Kotlin/Java `external fun`s) |
-| iOS | Swift C bridge over `libdtn_ffi.a` |
-| Windows / Linux / macOS | Link `dtn_ffi` directly, or via any FFI-capable UI toolkit |
+| Windows / Linux / macOS | desktop shell `dtn-shell` (shells/desktop), or `dtn_ffi` via any FFI-capable UI toolkit |
+| Android | JNI wrapper over `libdtn_ffi.so` (next phase) |
+| iOS | Swift C bridge over `libdtn_ffi.a` (next phase) |
 
 ## Build
 
@@ -67,8 +69,11 @@ Conversations (most recently active first):
 
 ## Honest scope
 
-The FFI covers the chat/app engine surface. GUI toolkits, mobile
-packaging (Gradle/Xcode projects), attachments and remote read
-receipts are future work; the FFI is the stable boundary they build
+The FFI covers the chat/app engine surface, and the desktop terminal
+shell (`shells/desktop`, docs/shell.md) is its working reference
+consumer. GUI toolkits, Android (JNI) and iOS (swift bridge) shells,
+desktop packaging, attachments and remote read receipts are future
+work; the FFI is the stable boundary they build
 on. `dtn_app_resolve_contact` returns NULL both for unknown aliases
 and errors; distinguish via `dtn_app_last_error`.
+

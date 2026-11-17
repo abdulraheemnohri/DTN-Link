@@ -9,7 +9,7 @@ without requiring a SIM card, cellular subscription or Wi-Fi router for every
 communication. It uses Bundle Protocol v7 (RFC 9171), store-carry-forward
 routing, modular physical transport adapters and optional internet gateways.
 
-## Status: Phases 1-12 + RFC 9173 security contexts + management + federation + app layer + FFI (core, transports, security, adapters, gateways, diagnostics, federation, apps, ffi)
+## Status: Phases 1-20 (core, transports, security, adapters, gateways, diagnostics, federation, apps, ffi, desktop shell)
 
 | Component | Status |
 |---|---|
@@ -36,7 +36,8 @@ routing, modular physical transport adapters and optional internet gateways.
 | CLI | implemented — init/status/send/receive/bundles/chat/forward/daemon/doctor/verify/keyring/encrypt/decrypt/decode/federation |
 | RFC 9173 default contexts: BIB-HMAC-SHA2 (ctx 1), BCB-AES-GCM with primary-block AAD (ctx 2) | implemented + tested (crates/dtn-bpsec::rfc9173) |
 | Signed key rotation (TOFU + signed KeyChange announcements) | implemented + tested (crates/dtn-keyring, dtn-daemon) |
-| Android / iOS / Windows / Linux GUI shells on the dtn-ffi C ABI | next phase |
+| Desktop shell on the FFI (dtn-shell + FFI self test) | implemented + tested (shells/desktop; `make -C shells/desktop test`) |
+| Android / iOS GUI shells on the dtn-ffi C ABI | next phase (FFI + desktop shell implemented) |
 | Federation: region map, gateway plans, per-region security policy, sweeps over real gateway contacts, `dtn-link federation` CLI | implemented + tested (crates/dtn-federation) |
 
 ## Build
@@ -54,6 +55,11 @@ For LoRa TNC / serial radio hardware support:
 For the platform FFI library (Android/iOS/desktop UI shells):
 
     cargo build -p dtn-ffi --release   # libdtn_ffi + include/dtn_app_ffi.h
+
+For the desktop shell (Phase 20):
+
+    make -C shells/desktop            # dtn-shell + FFI self test
+    make -C shells/desktop test       # run the FFI self test
 
 ## Quick start: two real nodes over TCP
 
@@ -79,7 +85,8 @@ For the platform FFI library (Android/iOS/desktop UI shells):
 See [docs/architecture.md](docs/architecture.md),
 [docs/adapters.md](docs/adapters.md),
 [docs/apps.md](docs/apps.md),
-[docs/ffi.md](docs/ffi.md) and
+[docs/ffi.md](docs/ffi.md),
+[docs/shell.md](docs/shell.md) and
 [docs/diagnostics.md](docs/diagnostics.md).
 
 ## Standards
@@ -93,3 +100,4 @@ See [docs/architecture.md](docs/architecture.md),
 ## License
 
 MIT
+
