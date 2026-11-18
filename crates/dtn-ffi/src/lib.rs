@@ -29,6 +29,10 @@
 //! The handle is internally a `Mutex<App>`, so a UI may call any entry
 //! point from any thread; calls serialize (the engine is single-store
 //! SQLite underneath anyway).
+//!
+//! With cargo feature `jni` (Android builds), the crate additionally
+//! exports the JNI entry points the `link.dtn.shell.Native` Kotlin
+//! object binds to (see `jni_shim`).
 
 use dtn_app::{App, AppError};
 use dtn_bpv7::Eid;
@@ -38,6 +42,9 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_longlong};
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
+
+#[cfg(feature = "jni")]
+pub mod jni_shim;
 
 // ---------------------------------------------------------------------------
 // Opaque handle + error protocol
@@ -53,7 +60,7 @@ thread_local! {
     static LAST_ERROR: RefCell<Option<CString>> = const { RefCell::new(None) };
 }
 
-fn set_last_error(msg: String) {
+pub(crate) fn set_last_error(msg: String) {
     let cs = CString::new(msg).unwrap_or_else(|_| CString::new("error").unwrap());
     LAST_ERROR.with(|e| *e.borrow_mut() = Some(cs));
 }
@@ -329,7 +336,7 @@ pub unsafe extern "C" fn dtn_app_poll_inbox(handle: *mut AppHandle) -> *mut c_ch
         .iter()
         .map(|m| {
             format!(
-                "{{\"id\":{},\"peer\":{},\"direction\":{},\"body\":{},\"created_at\":{},\"bundle_key\":{}}}",
+                "{\"id\":{},\"peer\":{},\"direction\":{},\"body\":{},\"created_at\":{},\"bundle_key\":{}}",
                 m.id,
                 json_str(&m.peer),
                 json_str(m.direction.as_str()),
@@ -362,7 +369,7 @@ pub unsafe extern "C" fn dtn_app_conversations(handle: *mut AppHandle) -> *mut c
         .iter()
         .map(|c| {
             format!(
-                "{{\"peer\":{},\"last_body\":{},\"last_at\":{},\"unread\":{},\"total\":{}}}",
+                "{\"peer\":{},\"last_body\":{},\"last_at\":{},\"unread\":{},\"total\":{}}",
                 json_str(&c.peer),
                 json_str(&c.last_body),
                 c.last_at,
@@ -402,7 +409,7 @@ pub unsafe extern "C" fn dtn_app_history(
         .iter()
         .map(|m| {
             format!(
-                "{{\"id\":{},\"peer\":{},\"direction\":{},\"body\":{},\"created_at\":{},\"bundle_key\":{}}}",
+                "{\"id\":{},\"peer\":{},\"direction\":{},\"body\":{},\"created_at\":{},\"bundle_key\":{}}",
                 m.id,
                 json_str(&m.peer),
                 json_str(m.direction.as_str()),
