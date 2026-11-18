@@ -9,7 +9,7 @@ without requiring a SIM card, cellular subscription or Wi-Fi router for every
 communication. It uses Bundle Protocol v7 (RFC 9171), store-carry-forward
 routing, modular physical transport adapters and optional internet gateways.
 
-## Status: Phases 1-20 (core, transports, security, adapters, gateways, diagnostics, federation, apps, ffi, desktop shell)
+## Status: Phases 1-21 (core, transports, security, adapters, gateways, diagnostics, federation, apps, ffi, desktop + android shells)
 
 | Component | Status |
 |---|---|
@@ -37,7 +37,8 @@ routing, modular physical transport adapters and optional internet gateways.
 | RFC 9173 default contexts: BIB-HMAC-SHA2 (ctx 1), BCB-AES-GCM with primary-block AAD (ctx 2) | implemented + tested (crates/dtn-bpsec::rfc9173) |
 | Signed key rotation (TOFU + signed KeyChange announcements) | implemented + tested (crates/dtn-keyring, dtn-daemon) |
 | Desktop shell on the FFI (dtn-shell + FFI self test) | implemented + tested (shells/desktop; `make -C shells/desktop test`) |
-| Android / iOS GUI shells on the dtn-ffi C ABI | next phase (FFI + desktop shell implemented) |
+| Android shell on the FFI (JNI shim + Kotlin chat app + JVM tests) | implemented + tested (shells/android; `./gradlew :app:testDebugUnitTest`, device UI) |
+| iOS / Swift bridge shell on the dtn-ffi C ABI | next phase (FFI + desktop + Android shells implemented) |
 | Federation: region map, gateway plans, per-region security policy, sweeps over real gateway contacts, `dtn-link federation` CLI | implemented + tested (crates/dtn-federation) |
 
 ## Build
@@ -60,6 +61,16 @@ For the desktop shell (Phase 20):
 
     make -C shells/desktop            # dtn-shell + FFI self test
     make -C shells/desktop test       # run the FFI self test
+
+For the Android shell (Phase 21) — native library + app:
+
+    cargo install cargo-ndk
+    cargo ndk -t arm64-v8a -t x86_64 \
+        -o shells/android/app/src/main/jniLibs build --release \
+        -p dtn-ffi --features jni     # libdtn_ffi.so with the JNI shim
+    gradle -p shells/android wrapper  # once; then ./gradlew
+    ./gradlew -p shells/android :app:testDebugUnitTest
+    ./gradlew -p shells/android :app:installDebug
 
 ## Quick start: two real nodes over TCP
 
@@ -86,7 +97,8 @@ See [docs/architecture.md](docs/architecture.md),
 [docs/adapters.md](docs/adapters.md),
 [docs/apps.md](docs/apps.md),
 [docs/ffi.md](docs/ffi.md),
-[docs/shell.md](docs/shell.md) and
+[docs/shell.md](docs/shell.md),
+[docs/android.md](docs/android.md) and
 [docs/diagnostics.md](docs/diagnostics.md).
 
 ## Standards
@@ -100,4 +112,3 @@ See [docs/architecture.md](docs/architecture.md),
 ## License
 
 MIT
-
