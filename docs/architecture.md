@@ -12,14 +12,16 @@
 8. Gateway layer — internet/satellite gateways [implemented — dtn-gateway (Phase 11)]
 9. Management layer — monitoring, diagnostics, configuration [implemented — dtn-diagnostics (health reports + contact log)]
 10. Federation layer — inter-region routing via gateway peers [implemented — dtn-federation (Phase 14)]
-11. Platform shell boundary — C ABI over the application layer [implemented — dtn-ffi (Phase 19); desktop shell dtn-shell (Phase 20)]
+11. Platform shell boundary — C ABI over the application layer [implemented — dtn-ffi (Phase 19); desktop shell dtn-shell (Phase 20); Android JNI shell (Phase 21)]
 
-## Current implementation (Phases 1-20)
+## Current implementation (Phases 1-21)
 
 ```
 +--------------------------------------------------------+
 | cli: init/status/send/receive/bundles/chat/forward/     |
 |     daemon/doctor/verify/decode                         |
+| shells: desktop dtn-shell (C11, Phase 20) +             |
+|     android link.dtn.shell (Kotlin/JNI, Phase 21)       |
 +--------------------------------------------------------+
 | dtn-ffi: C ABI over the app engine for platform         |
 |   UI shells (libdtn_ffi + dtn_app_ffi.h, Phase 19)      |
@@ -221,7 +223,7 @@ dtn-gateway decides WHEN to contact a peer and then performs a
 real contact using the same wire protocol as the daemon and
 adapters (TCPCL-lite exchange, optional BPSec SecurityCtx):
 
-- **ContactPlan** — text-format plans ("addr" always open,
+- **ContactPlan** — text-format contact plans ("addr" always open,
   "addr start end" unix-seconds window, # comments), parse/to_text
   round-trip, explicit tested window math (inclusive start,
   exclusive end, opens_in).
@@ -350,8 +352,41 @@ protocol (no crashes), lifecycle + EIDs, contacts (created / updated
 conversation/unread state, poll idempotency, close/free no-ops, and
 persistence across reopen. See docs/shell.md. Honest scope: outbound
 flow + storage are exercised from C; inbound delivery stays covered
-by the Rust-side dtn-ffi tests. Android (JNI) and iOS shells are the
-remaining platform work on the same ABI.
+by the Rust-side dtn-ffi tests.
+
+### Android shell (Phase 21)
+
+`shells/android` is the first mobile consumer of the FFI boundary:
+a minimal but fully functional Kotlin chat app that loads the real
+`libdtn_ffi` (cargo feature `jni`, built per ABI with cargo-ndk) and
+drives the chat engine through a JNI shim that wraps the exact
+`dtn_app_*` C ABI functions —
+
+- `crates/dtn-ffi/src/jni_shim.rs` exports
+  `Java_link_dtn_shell_Native_*` for the whole ABI surface
+  (lifecycle, EID, send, poll, conversations, history, unread,
+  mark-read, contacts, last error) and owns the JNI string /
+  handle conversions; NULL maps to Java null and the wrapper reads
+  the tested `dtn_app_last_error` protocol.
+- `link.dtn.shell.Native` (Kotlin) declares the mirrored `external`
+  surface; `DtnFfi` is the safe handle wrapper with typed
+  `DtnFfiException`s carrying the native error messages; `Messages`
+  parses the flat JSON array shapes into typed models (malformed
+  input fails closed).
+- `MainActivity` registers contacts, sends by alias (resolved via
+  the FFI contact table) or raw EID, polls delivered bundles and
+  renders conversations with unread badges; the node opens on a
+  background thread (SQLite + Ed25519 keygen on first launch).
+- JVM unit tests (`./gradlew :app:testDebugUnitTest`) cover the
+  message/conversation JSON models end to end, including null and
+  present bundle keys, ordering preservation and malformed-JSON
+  failure.
+
+See docs/android.md. Honest scope: the JNI shim itself needs a live
+JVM (device/emulator), so the wire/storage behavior underneath is
+verified by the Rust-side dtn-ffi tests and the desktop self test;
+background sync service, notifications, attachments and the iOS
+(Swift bridge) shell remain future work on the same ABI.
 
 ## Roadmap
 
@@ -368,5 +403,5 @@ remaining platform work on the same ABI.
 - Done: Phase 18 platform application layer — dtn-app (contacts, conversations, unread tracking, poll-based inbox, text renderers) + the dtn-link chat CLI (docs/apps.md).
 - Done: Phase 19 FFI boundary — dtn-ffi C ABI over the app engine (lifecycle, send/poll/conversations/history/unread/contacts, thread-local error protocol, JSON emission, dtn_app_ffi.h header; docs/ffi.md).
 - Done: Phase 20 desktop shell — shells/desktop/dtn-shell (POSIX C11, dependency-free) drives the full dtn-ffi C ABI over the real libdtn_ffi (lifecycle, contacts, send, conversations/history, unread, poll), a flat-JSON reader for the FFI shapes, and make test running dtn-ffi-selftest end-to-end against the built library (docs/shell.md).
-- Next: Android (JNI) and iOS (Swift bridge) GUI shells on the same dtn-ffi C ABI; later: attachments, remote read receipts, TLS (RFC 9174 §4.4), web-of-trust, TLE-driven pass prediction, a network-wide management plane.
-
+- Done: Phase 21 Android shell — shells/android (Kotlin) embeds the real libdtn_ffi on Android through the new dtn-ffi jni feature (Java_link_dtn_shell_Native_* shim over the exact dtn_app_* C ABI), with the safe DtnFfi wrapper, typed JSON models, a functional chat MainActivity and JVM unit tests over the FFI JSON shapes (docs/android.md).
+- Next: iOS (Swift bridge) GUI shell on the same dtn-ffi C ABI; later: attachments, remote read receipts, TLS (RFC 9174 §4.4), web-of-trust, TLE-driven pass prediction, a network-wide management plane.
