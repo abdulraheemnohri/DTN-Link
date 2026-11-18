@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.20.0 (2026-11-18)
+
+Phase 21 — the first mobile platform shell: Android on the FFI boundary.
+
+- dtn-ffi: new cargo feature `jni` — `src/jni_shim.rs` exports the JNI
+  entry points the Kotlin object `link.dtn.shell.Native` binds to
+  (`Java_link_dtn_shell_Native_open/close/eid/send/pollInbox/
+  conversations/history/unreadTotal/markRead/addContact/resolveContact/
+  lastError`). The shim adds no logic of its own: it converts Java
+  strings (JNI → CString, with the conventional last-error recorded on
+  conversion failures or interior NULs) and the handle transport long
+  (address or 0 = NULL) into the exact `dtn_app_*` C ABI functions, so
+  NULL handling, the thread-local `dtn_app_last_error` protocol and
+  `dtn_string_free` ownership re-use the tested Phase 19/20 behaviors
+  verbatim. Malformed node numbers / lifetimes clamp instead of
+  wrapping; the plain C ABI is unchanged without the feature.
+- shells/android (new): a minimal but fully functional Kotlin chat app
+  embedding the real engine — no Java protocol reimplementation, no
+  fake transports:
+  - `Native.kt`: the direct JNI surface (`System.loadLibrary` +
+    mirrored `external fun`s and the strategy constants from
+    `dtn_app_ffi.h`).
+  - `DtnFfi.kt`: the safe handle wrapper — typed `DtnFfiException`s
+    carrying the native last-error message, open/close lifecycle,
+    send (by raw EID; alias resolution in the app), poll, conversations,
+    history, unreadTotal, markRead, add/resolve contacts; implements
+    AutoCloseable and refuses use-after-close.
+  - `Messages.kt`: typed `DtnMessage` / `Conversation` models over the
+    exact flat JSON array shapes dtn-ffi emits (the same shapes the
+    desktop shell's `json.c` reads); malformed input fails closed.
+  - `MainActivity.kt`: functional chat UI — node opens on a background
+    thread (SQLite + Ed25519 keygen), status shows the local EID,
+    offline catch-up poll on startup, contact registration,
+    sending, poll with unread totals, conversation list (unread
+    badges) and per-peer history (opened via the FFI-resolved alias,
+    marked read after rendering). Transport/engine errors are
+    surfaced as status text, never crashes.
+  - `app/src/test/.../MessagesTest.kt` (5 JVM unit tests,
+    `./gradlew :app:testDebugUnitTest`): poll parse with null and
+    present bundle keys, history with escapes + FFIs oldest-first
+    ordering preserved, conversation-list counts and ordering, empty
+    arrays, malformed-JSON failure. The JVM-side tests use
+    `org.json:json` since org.json ships only in Android.
+  - Gradle setup (settings/root/app build files, AndroidManifest) and
+    shells/android/README.md: `cargo ndk -t ... -o
+    app/src/main/jniLibs build --release -p dtn-ffi --features jni`
+    builds per-ABI `libdtn_ffi.so`; then normal assemble/install.
+- docs: new docs/android.md (components, native build, app build/test,
+  honest scope); README status table gains the Android-shell row
+  (iOS marked next phase) and gains the Android build block;
+  architecture.md marks Phase 21 (layer 11 consumer on mobile) and
+  updates the roadmap; workspace bumped to 0.20.0.
+- Honest scope: the JNI shim itself needs a live JVM (device/emulator),
+  so its wire/storage behavior underneath is verified by the
+  Rust-side dtn-ffi tests and the desktop self test; background sync
+  service, notifications, attachments and the iOS (Swift bridge)
+  shell remain future work on the same ABI.
+
 ## 0.19.0 (2026-11-17)
 
 Phase 20 — the first platform UI shell: the desktop C shell on the FFI boundary.
