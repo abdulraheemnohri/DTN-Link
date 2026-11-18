@@ -9,7 +9,14 @@ description = "DTN-Link C ABI (FFI) over the dtn-app engine for platform UI shel
 name = "dtn_ffi"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Android ships libdtn_ffi as a JNI library: the Kotlin object
+# link.dtn.shell.Native binds Java_link_dtn_shell_Native_* exported by
+# src/jni_shim.rs. The plain C ABI is unchanged without this feature.
+jni = ["dep:jni"]
+
 [dependencies]
 dtn-app.workspace = true
 dtn-bpv7.workspace = true
 dtn-core.workspace = true
+jni = { version = "0.21", optional = true }
