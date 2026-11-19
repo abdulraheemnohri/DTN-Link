@@ -12,22 +12,23 @@
 8. Gateway layer — internet/satellite gateways [implemented — dtn-gateway (Phase 11)]
 9. Management layer — monitoring, diagnostics, configuration [implemented — dtn-diagnostics (health reports + contact log)]
 10. Federation layer — inter-region routing via gateway peers [implemented — dtn-federation (Phase 14)]
-11. Platform shell boundary — C ABI over the application layer [implemented — dtn-ffi (Phase 19); desktop shell dtn-shell (Phase 20); Android JNI shell (Phase 21)]
+11. Platform shell boundary — C ABI over the application layer [implemented — dtn-ffi (Phase 19); desktop shell dtn-shell (Phase 20); Android JNI shell (Phase 21); iOS Swift shell (Phase 22)]
 
-## Current implementation (Phases 1-21)
+## Current implementation (Phases 1-22)
 
 ```
 +--------------------------------------------------------+
 | cli: init/status/send/receive/bundles/chat/forward/     |
 |     daemon/doctor/verify/decode                         |
 | shells: desktop dtn-shell (C11, Phase 20) +             |
-|     android link.dtn.shell (Kotlin/JNI, Phase 21)       |
+|     android link.dtn.shell (Kotlin/JNI, Phase 21) +     |
+|     ios DtnShell (Swift/SwiftUI, Phase 22)              |
 +--------------------------------------------------------+
 | dtn-ffi: C ABI over the app engine for platform         |
 |   UI shells (libdtn_ffi + dtn_app_ffi.h, Phase 19)      |
 | dtn-app: contacts, conversations, unread tracking,      |
 |   poll-based inbox (Phase 18 application layer)         |
-| dtn-daemon: contacts with sign/verify + TOFU key learn |
+| dtn-daemon: contacts with sign/verify + TOFU key learn  |
 |   + MITM enforcement + signed key rotation (Phase 17)   |
 |   + contact-outcome logging (dtn-diagnostics)           |
 | dtn-transport: framing codecs (length-prefix, KISS) +   |
@@ -388,6 +389,51 @@ verified by the Rust-side dtn-ffi tests and the desktop self test;
 background sync service, notifications, attachments and the iOS
 (Swift bridge) shell remain future work on the same ABI.
 
+### iOS shell (Phase 22)
+
+`shells/ios` is the third consumer of the FFI boundary and the
+second mobile shell: a minimal but fully functional SwiftUI chat
+app that loads the real `libdtn_ffi` (iOS static archive built by
+`shells/ios/build.sh`) through a Swift bridge over the exact
+`dtn_app_*` C ABI —
+
+- `CDtnFfi` — a SwiftPM C target exposing `dtn_app_ffi.h` through a
+  custom module map (header copy kept in sync with
+  `crates/dtn-ffi/include`).
+- `DtnModels` — typed `Message` / `Conversation` / `MessageDirection`
+  models over the exact flat JSON array shapes dtn-ffi emits; missing
+  or wrongly-typed fields throw `DtnJsonError` (malformed input fails
+  closed), ordering is preserved.
+- `DtnFfi` — the safe handle wrapper: typed `DtnFfiError`s carrying
+  the native `dtn_app_last_error` message, open/close lifecycle with
+  an owning deinit (no leaked handles), send / poll / conversations /
+  history / unread / mark-read / contacts, `dtn_string_free` applied
+  to every library-allocated string, unknown-alias resolve reported
+  as nil rather than an engine error.
+- `ChatController` — @MainActor ObservableObject: startup catch-up
+  poll, conversation list with unread badges, per-peer history,
+  alias/raw recipient resolution (`dtn://`, `ipn:`, `dtn:none`,
+  bare names) and status text for transport/engine errors.
+- SwiftUI example (`shells/ios/Example/ios/Views`) — ShellApp entry
+  point (node opens in Application Support/DTNLink, DTN_NODE_NUMBER
+  env override) and ChatView: conversation list, unread badge
+  capsules, compose bar with alias/EID field, poll button and an
+  add-contact sheet.
+- XCTest suite (`swift test`, target DtnModels, no native library
+  needed): full message shape with null and present bundle keys,
+  ordering preservation, empty arrays, missing-field /
+  unknown-direction / null-body / garbage JSON all failing closed,
+  conversation shape + recency ordering, and stable error
+  descriptions.
+
+See docs/ios.md. Honest scope: the DtnFfi bridge needs a live
+native library and an Apple toolchain, so the wire/storage behavior
+underneath is verified by the Rust-side dtn-ffi tests and the
+desktop self test (as for the Android JNI shim); the model/JSON
+layer is covered by the XCTest suite. Background sync service,
+notifications, attachments and remote read receipts remain future
+work on the same ABI.
+
 ## Roadmap
 
 - Phases 5-6, 8 security (done): BIB integrity, BCB confidentiality, keyring trust store, secured contacts with TOFU key learning.
@@ -404,4 +450,5 @@ background sync service, notifications, attachments and the iOS
 - Done: Phase 19 FFI boundary — dtn-ffi C ABI over the app engine (lifecycle, send/poll/conversations/history/unread/contacts, thread-local error protocol, JSON emission, dtn_app_ffi.h header; docs/ffi.md).
 - Done: Phase 20 desktop shell — shells/desktop/dtn-shell (POSIX C11, dependency-free) drives the full dtn-ffi C ABI over the real libdtn_ffi (lifecycle, contacts, send, conversations/history, unread, poll), a flat-JSON reader for the FFI shapes, and make test running dtn-ffi-selftest end-to-end against the built library (docs/shell.md).
 - Done: Phase 21 Android shell — shells/android (Kotlin) embeds the real libdtn_ffi on Android through the new dtn-ffi jni feature (Java_link_dtn_shell_Native_* shim over the exact dtn_app_* C ABI), with the safe DtnFfi wrapper, typed JSON models, a functional chat MainActivity and JVM unit tests over the FFI JSON shapes (docs/android.md).
-- Next: iOS (Swift bridge) GUI shell on the same dtn-ffi C ABI; later: attachments, remote read receipts, TLS (RFC 9174 §4.4), web-of-trust, TLE-driven pass prediction, a network-wide management plane.
+- Done: Phase 22 iOS shell — shells/ios (Swift/SwiftPM) embeds the real libdtn_ffi on iOS through the CDtnFfi C target and the DtnFfi Swift bridge over the exact dtn_app_* C ABI, with typed JSON models, a @MainActor ChatController, a SwiftUI chat example and an XCTest model suite that runs without the native library (docs/ios.md).
+- Next: attachments, remote read receipts, TLS (RFC 9174 §4.4), web-of-trust, TLE-driven pass prediction, a network-wide management plane, background sync services and push notifications on the mobile shells.

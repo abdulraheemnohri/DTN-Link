@@ -9,7 +9,7 @@ without requiring a SIM card, cellular subscription or Wi-Fi router for every
 communication. It uses Bundle Protocol v7 (RFC 9171), store-carry-forward
 routing, modular physical transport adapters and optional internet gateways.
 
-## Status: Phases 1-21 (core, transports, security, adapters, gateways, diagnostics, federation, apps, ffi, desktop + android shells)
+## Status: Phases 1-22 (core, transports, security, adapters, gateways, diagnostics, federation, apps, ffi, desktop + android + ios shells)
 
 | Component | Status |
 |---|---|
@@ -38,7 +38,7 @@ routing, modular physical transport adapters and optional internet gateways.
 | Signed key rotation (TOFU + signed KeyChange announcements) | implemented + tested (crates/dtn-keyring, dtn-daemon) |
 | Desktop shell on the FFI (dtn-shell + FFI self test) | implemented + tested (shells/desktop; `make -C shells/desktop test`) |
 | Android shell on the FFI (JNI shim + Kotlin chat app + JVM tests) | implemented + tested (shells/android; `./gradlew :app:testDebugUnitTest`, device UI) |
-| iOS / Swift bridge shell on the dtn-ffi C ABI | next phase (FFI + desktop + Android shells implemented) |
+| iOS / Swift bridge shell on the dtn-ffi C ABI (SwiftPM bridge + SwiftUI chat app + model tests) | implemented + tested (shells/ios; `swift test`, device app) |
 | Federation: region map, gateway plans, per-region security policy, sweeps over real gateway contacts, `dtn-link federation` CLI | implemented + tested (crates/dtn-federation) |
 
 ## Build
@@ -72,6 +72,11 @@ For the Android shell (Phase 21) — native library + app:
     ./gradlew -p shells/android :app:testDebugUnitTest
     ./gradlew -p shells/android :app:installDebug
 
+For the iOS shell (Phase 22) — Swift bridge + SwiftUI app:
+
+    ./shells/ios/build.sh                                  # iOS static libs
+    cd shells/ios && swift test                            # model suite
+
 ## Quick start: two real nodes over TCP
 
     # Terminal 1 — node B (listener)
@@ -98,7 +103,8 @@ See [docs/architecture.md](docs/architecture.md),
 [docs/apps.md](docs/apps.md),
 [docs/ffi.md](docs/ffi.md),
 [docs/shell.md](docs/shell.md),
-[docs/android.md](docs/android.md) and
+[docs/android.md](docs/android.md),
+[docs/ios.md](docs/ios.md) and
 [docs/diagnostics.md](docs/diagnostics.md).
 
 ## Standards

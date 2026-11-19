@@ -1,0 +1,4 @@
+module CDtnFfi {
+    header "include/dtn_app_ffi.h"
+    export *
+}

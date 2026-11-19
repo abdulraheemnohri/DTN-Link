@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.21.0 (2026-11-19)
+
+Phase 22 — the iOS (Swift bridge) shell: the third consumer of the
+dtn-ffi C ABI, completing the three-platform shell set (desktop C,
+Android JNI, iOS Swift).
+
+- shells/ios (new): a SwiftPM Swift 5.7 package embedding the real
+  libdtn_ffi on iOS — no Swift-side protocol reimplementation, the
+  exact `dtn_app_*` C ABI from dtn_app_ffi.h:
+  - `Sources/CDtnFfi`: C target (module.modulemap + header copy kept
+    in sync with crates/dtn-ffi/include).
+  - `Sources/DtnModels`: typed Message / Conversation /
+    MessageDirection models over the exact flat JSON array shapes
+    dtn-ffi emits — missing or wrongly-typed fields throw
+    DtnJsonError (malformed input fails closed); ordering preserved;
+    depends on nothing but Foundation, so the test suite runs without
+    the native library.
+  - `Sources/DtnShell/DtnFfi.swift`: the safe handle wrapper — typed
+    DtnFfiErrors carrying the native dtn_app_last_error message,
+    open/close lifecycle with an owning deinit (no leaked handles;
+    close() idempotent), send / poll / conversations / history /
+    unread / mark-read / add+resolve contacts; every
+    library-allocated string released with dtn_string_free;
+    unknown-alias resolve reported as nil instead of an engine error.
+  - `Sources/DtnShell/ChatController.swift`: @MainActor
+    ObservableObject over the bridge — startup catch-up poll,
+    conversation list with unread badges, per-peer history,
+    alias/raw recipient resolution (dtn://, ipn:, dtn:none, bare
+    names) and status text (errors surfaced, never crashes).
+  - `Example/ios/Views`: SwiftUI chat app — ShellApp entry point
+    (database under Application Support/DTNLink, DTN_NODE_NUMBER env
+    override) and ChatView: conversation list, unread badge
+    capsules, compose bar with alias/EID field, poll button and an
+    add-contact sheet.
+  - `Tests/DtnShellTests` (XCTest): 11 tests pinning the FFI JSON
+    contract — full message shape with null + present bundle keys,
+    ordering preservation, empty arrays, missing-field /
+    unknown-direction / null-body / garbage-JSON failing closed,
+    conversation shape + recency ordering, stable error
+    descriptions.
+  - `build.sh`: iOS static-lib build driver (rustup targets
+    aarch64-apple-ios + aarch64-apple-ios-sim, cargo build -p
+    dtn-ffi --release per triple, archives staged under
+    shells/ios/.build/ios).
+- docs: new docs/ios.md (components, build steps, wire-shape
+  contract, error protocol, honest scope); README status line 1-22,
+  iOS table row marked implemented + Swift build block + docs link;
+  architecture.md marks Phase 22 (layer 11 third consumer), the
+  current-implementation box and the roadmap; workspace bumped to
+  0.21.0.
+- Honest scope: the DtnFfi bridge needs a live native library and an
+  Apple toolchain, so its wire/storage behavior underneath is
+  verified by the Rust-side dtn-ffi tests and the desktop self test
+  (as for the Android JNI shim); the model/JSON layer is covered by
+  the XCTest suite. Background sync service, notifications,
+  attachments and remote read receipts remain future work on the
+  same ABI.
+
 ## 0.20.0 (2026-11-18)
 
 Phase 21 — the first mobile platform shell: Android on the FFI boundary.
@@ -69,7 +127,7 @@ Phase 20 — the first platform UI shell: the desktop C shell on the FFI boundar
   - Lifecycle + identity on startup (`dtn_app_open` / `dtn_app_eid`),
     offline catch-up poll of delivered bundles.
   - Commands: /me, /list, /chat (open a conversation, prints history),
-    /back, /msg, /add, /read, /unread, /poll, /quit; inside a
+    /back, /msg, /add, /read, `/unread`, /poll, /quit; inside a
     conversation a bare line sends. Aliases resolve via
     `dtn_app_resolve_contact`; raw dtn://, ipn:, dtn:none and bare
     node names are accepted directly.
@@ -213,8 +271,8 @@ Phase 17 — MITM enforcement + signed key rotation.
   trusted key FAILS the contact (FrameError::Protocol) unless the peer
   presents a valid `KeyChange` announcement in the hello, which is
   verified against the currently trusted key and applied via rotate.
-  `SecurityCtx::pending_rotation` lets a rotated node announce its new
-  key during the hello. In strict (enforcing) mode, signed bundles
+  `SecurityCtx::pending_rotation` lets a rotated node announce its
+  new key during the hello. In strict (enforcing) mode, signed bundles
   from sources with no trusted key are DROPPED instead of accepted
   with a log line. The hello probe distinguishes a rotation frame
   (DTNKC1 magic) from a first bundle frame (legacy peers) and from
@@ -232,8 +290,8 @@ Phase 17 — MITM enforcement + signed key rotation.
   strict-mode unknown-source drop vs legacy acceptance, signing-key
   accessor, FrameError::Protocol rendering.
 - docs: architecture.md gains the Phase 17 section; roadmap updated.
-- Honest scope: a rotation announcement is only understood by peers
-  on >= 0.16 (announcing to an older peer degrades that one contact);
+- Honest scope: a rotation announcement is only understood by peers on
+  >= 0.16 (announcing to an older peer degrades that one contact);
   web-of-trust and operator-confirmed key pinning remain future work;
   TLS (RFC 9174 §4.4) unchanged.
 
@@ -629,4 +687,3 @@ Phases 2-4 — multi-hop forwarding, hybrid routing, TCP transport.
 
 Phase 1 — Rust core foundation (BPv7 CBOR, identity, SQLite store, node
 engine, CLI, CI).
-
