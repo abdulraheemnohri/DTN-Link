@@ -9,7 +9,7 @@ without requiring a SIM card, cellular subscription or Wi-Fi router for every
 communication. It uses Bundle Protocol v7 (RFC 9171), store-carry-forward
 routing, modular physical transport adapters and optional internet gateways.
 
-## Status: Phases 1-22 (core, transports, security, adapters, gateways, diagnostics, federation, apps, ffi, desktop + android + ios shells)
+## Status: Phases 1-23 (core, transports, security, adapters, gateways, diagnostics, federation, apps + attachments, ffi, desktop + android + ios shells)
 
 | Component | Status |
 |---|---|
@@ -31,9 +31,9 @@ routing, modular physical transport adapters and optional internet gateways.
 | Internet & satellite gateways (contact plans, pass windows) | implemented + tested (crates/dtn-gateway) |
 | Interop + performance benchmark suite | implemented + tested (crates/dtn-bench) |
 | Diagnostics: health reports + kind-tagged contact history with per-contact bundle counters (`dtn-link doctor`) | implemented + tested (crates/dtn-diagnostics) |
-| Platform app engine: contacts, conversations, unread tracking, poll inbox (`dtn-link chat`) | implemented + tested (crates/dtn-app) |
+| Platform app engine: contacts, conversations, unread tracking, poll inbox, file attachments (`dtn-link chat send-file` / `extract`) | implemented + tested (crates/dtn-app) |
 | C ABI / FFI over the app engine for platform UI shells (`libdtn_ffi` + `dtn_app_ffi.h`) | implemented + tested (crates/dtn-ffi) |
-| CLI | implemented — init/status/send/receive/bundles/chat/forward/daemon/doctor/verify/keyring/encrypt/decrypt/decode/federation |
+| CLI | implemented — init/status/send/receive/bundles/chat (+ send-file/extract)/forward/daemon/doctor/verify/keyring/encrypt/decrypt/decode/federation |
 | RFC 9173 default contexts: BIB-HMAC-SHA2 (ctx 1), BCB-AES-GCM with primary-block AAD (ctx 2) | implemented + tested (crates/dtn-bpsec::rfc9173) |
 | Signed key rotation (TOFU + signed KeyChange announcements) | implemented + tested (crates/dtn-keyring, dtn-daemon) |
 | Desktop shell on the FFI (dtn-shell + FFI self test) | implemented + tested (shells/desktop; `make -C shells/desktop test`) |
@@ -92,6 +92,7 @@ For the iOS shell (Phase 22) — Swift bridge + SwiftUI app:
 
     dtn-link chat contacts add bob dtn://bob
     dtn-link chat send bob "see you at the pass"
+    dtn-link chat send-file bob report.pdf   # queue a file attachment
     dtn-link chat poll        # after the daemons have synced
     dtn-link chat list        # conversations with unread badges
     dtn-link chat list bob    # one conversation, marks it read

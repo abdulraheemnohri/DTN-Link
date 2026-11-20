@@ -216,6 +216,45 @@ fn main() {
                     println!("Queued for {} (bundle seq key {})", m.peer, m.bundle_key.unwrap_or_default());
                     println!("The daemon/gateway/adapter carries it on the next contact (DTN store-carry-forward).");
                 }
+                Some("send-file") => {
+                    // usage: dtn-link chat send-file <alias|eid> <path> [lifetime-seconds]
+                    if args.len() < 5 || args.len() > 6 {
+                        eprintln!("usage: dtn-link chat send-file <alias|eid> <path> [lifetime-seconds]");
+                        std::process::exit(2);
+                    }
+                    let lifetime: u64 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(3600);
+                    let mut app = dtn_app::App::open(1, &db_path(), Strategy::Epidemic)
+                        .expect("failed to open app");
+                    let dest = chat_dest(&app, &args[3]);
+                    let m = app
+                        .send_file(&dest, std::path::Path::new(&args[4]), lifetime)
+                        .unwrap_or_else(|e| {
+                            eprintln!("send-file failed: {e}");
+                            std::process::exit(1);
+                        });
+                    println!("Queued for {} as \"{}\"", m.peer, m.body);
+                    println!("The daemon/gateway/adapter carries it on the next contact (DTN store-carry-forward).");
+                }
+                Some("extract") => {
+                    // usage: dtn-link chat extract <message-id> <dest-dir>
+                    if args.len() != 5 {
+                        eprintln!("usage: dtn-link chat extract <message-id> <dest-dir>");
+                        std::process::exit(2);
+                    }
+                    let Ok(id) = args[3].parse::<i64>() else {
+                        eprintln!("error: message id must be a number (see: dtn-link chat list <peer>)");
+                        std::process::exit(2);
+                    };
+                    let app = dtn_app::App::open(1, &db_path(), Strategy::Epidemic)
+                        .expect("failed to open app");
+                    match app.extract_attachment(id, std::path::Path::new(&args[4])) {
+                        Ok(path) => println!("Extracted to {}", path.display()),
+                        Err(e) => {
+                            eprintln!("extract failed: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
                 Some("poll") => {
                     let mut app = dtn_app::App::open(1, &db_path(), Strategy::Epidemic)
                         .expect("failed to open app");
@@ -247,7 +286,7 @@ fn main() {
                 }
                 _ => {
                     eprintln!(
-                        "usage:\n  dtn-link chat contacts add <alias> <eid-uri>\n  dtn-link chat contacts list\n  dtn-link chat send <alias|eid> <message> [lifetime]\n  dtn-link chat poll\n  dtn-link chat list [alias|eid]"
+                        "usage:\n  dtn-link chat contacts add <alias> <eid-uri>\n  dtn-link chat contacts list\n  dtn-link chat send <alias|eid> <message> [lifetime]\n  dtn-link chat send-file <alias|eid> <path> [lifetime]\n  dtn-link chat poll\n  dtn-link chat list [alias|eid]\n  dtn-link chat extract <message-id> <dest-dir>"
                     );
                     std::process::exit(2);
                 }
@@ -630,7 +669,7 @@ fn main() {
                 }
             }
         }
-        Some("version") => println!("dtn-link 0.18.0 (BPv7, TCPCLv4, BPSec, gateways, federation, diagnostics, app layer, FFI)"),
+        Some("version") => println!("dtn-link 0.22.0 (BPv7, TCPCLv4, BPSec, gateways, federation, diagnostics, app layer, attachments, FFI)"),
         _ => {
             eprintln!(
                 "dtn-link — decentralized DTN communication
@@ -644,6 +683,8 @@ usage:
   dtn-link chat contacts add <alias> <eid-uri>
   dtn-link chat contacts list
   dtn-link chat send <alias|eid> <message> [lifetime-seconds]
+  dtn-link chat send-file <alias|eid> <path> [lifetime-seconds]
+  dtn-link chat extract <message-id> <dest-dir>
   dtn-link chat poll
   dtn-link chat list [alias|eid]
   dtn-link forward <dtn://peer> [strategy]

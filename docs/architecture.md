@@ -2,7 +2,7 @@
 
 ## Layered model (target)
 
-1. Application layer — messaging, files, alerts [messaging implemented — dtn-app (Phase 18); files/alerts future]
+1. Application layer — messaging, files, alerts [messaging + attachments implemented — dtn-app (Phases 18/23); alerts future]
 2. Identity layer — Ed25519 node identities [implemented]
 3. Bundle layer — BPv7 (RFC 9171) creation/validation [implemented]
 4. Security layer — BPSec (RFC 9172) [BIB + BCB implemented, RFC 9173 contexts BIB-HMAC-SHA2 / BCB-AES-GCM]
@@ -301,9 +301,14 @@ engine and persists app state in a sidecar SQLite database
 
 The node engine keeps store-carry-forward, dedup, expiry and BPSec;
 `send_text()` hands the message to the engine as a bundle that waits
-in the store for the next contact. See docs/apps.md. Honest scope:
+in the store for the next contact. Phase 23 added file attachments:
+`send_file()` sends a real file as one DTNA1 attachment payload, the
+bytes persist in the app database on delivery, and
+`extract_attachment()` writes them back with the filename re-validated
+(no path traversal possible). See docs/apps.md. Honest scope:
 this is the shared engine, not the platform UI shells — GUI toolkits,
-attachments and remote read receipts are future work.
+chunked multi-bundle attachments, MIME metadata and remote read
+receipts are future work.
 
 ### FFI boundary (Phase 19)
 
@@ -451,4 +456,5 @@ work on the same ABI.
 - Done: Phase 20 desktop shell — shells/desktop/dtn-shell (POSIX C11, dependency-free) drives the full dtn-ffi C ABI over the real libdtn_ffi (lifecycle, contacts, send, conversations/history, unread, poll), a flat-JSON reader for the FFI shapes, and make test running dtn-ffi-selftest end-to-end against the built library (docs/shell.md).
 - Done: Phase 21 Android shell — shells/android (Kotlin) embeds the real libdtn_ffi on Android through the new dtn-ffi jni feature (Java_link_dtn_shell_Native_* shim over the exact dtn_app_* C ABI), with the safe DtnFfi wrapper, typed JSON models, a functional chat MainActivity and JVM unit tests over the FFI JSON shapes (docs/android.md).
 - Done: Phase 22 iOS shell — shells/ios (Swift/SwiftPM) embeds the real libdtn_ffi on iOS through the CDtnFfi C target and the DtnFfi Swift bridge over the exact dtn_app_* C ABI, with typed JSON models, a @MainActor ChatController, a SwiftUI chat example and an XCTest model suite that runs without the native library (docs/ios.md).
-- Next: attachments, remote read receipts, TLS (RFC 9174 §4.4), web-of-trust, TLE-driven pass prediction, a network-wide management plane, background sync services and push notifications on the mobile shells.
+- Done: Phase 23 attachments — dtn-app::attachments DTNA1 payload format (strict decode, safe-filename validation, 8 MiB cap), App::send_file / attachment_for / extract_attachment, attachment bytes persisted in the app database, chat CLI send-file/extract (docs/apps.md).
+- Next: remote read receipts, TLS (RFC 9174 §4.4), web-of-trust, TLE-driven pass prediction, a network-wide management plane, background sync services and push notifications on the mobile shells.

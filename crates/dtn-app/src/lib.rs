@@ -23,10 +23,12 @@
 //! are arbitrary bytes, but a messaging app presents text.
 //!
 //! Honest scope: this is the shared engine, not the platform UI shells
-//! themselves — no FFI bindings, no GUI toolkit, no attachments and no
-//! delivery receipts from the remote side (an inbound message is
-//! "delivered" locally when it lands in the conversation). Attachments
-//! and remote read receipts are future work.
+//! themselves. File attachments arrived in Phase 23 (`send_file` /
+//! `extract_attachment`); GUI toolkits and delivery receipts from the
+//! remote side remain future work.
+
+mod attachments;
+pub use attachments::{validate_filename, Attachment, AttachmentError};
 
 use dtn_bpv7::Eid;
 use dtn_core::{Node, NodeError, Strategy};
@@ -99,6 +101,10 @@ pub struct Conversation {
 pub enum AppError {
     Storage(rusqlite::Error),
     Node(NodeError),
+    /// Local filesystem I/O (reading an attachment, extracting one).
+    Io(std::io::Error),
+    /// No attachment is stored for the requested message.
+    NoSuchAttachment,
 }
 
 impl std::fmt::Display for AppError {
@@ -106,6 +112,8 @@ impl std::fmt::Display for AppError {
         match self {
             AppError::Storage(e) => write!(f, "app database error: {e}"),
             AppError::Node(e) => write!(f, "node error: {e}"),
+            AppError::Io(e) => write!(f, "app i/o error: {e}"),
+            AppError::NoSuchAttachment => write!(f, "no attachment stored for this message"),
         }
     }
 }
@@ -116,6 +124,9 @@ impl From<rusqlite::Error> for AppError {
 }
 impl From<NodeError> for AppError {
     fn from(e: NodeError) -> Self { AppError::Node(e) }
+}
+impl From<std::io::Error> for AppError {
+    fn from(e: std::io::Error) -> Self { AppError::Io(e) }
 }
 
 // ---------------------------------------------------------------------------
@@ -143,7 +154,11 @@ impl AppDatabase {
                created_at INTEGER NOT NULL,
                bundle_key TEXT,
                read INTEGER NOT NULL DEFAULT 0);
-             CREATE INDEX IF NOT EXISTS idx_messages_peer ON messages(peer, id);",
+             CREATE INDEX IF NOT EXISTS idx_messages_peer ON messages(peer, id);
+             CREATE TABLE IF NOT EXISTS attachments (
+               message_id INTEGER PRIMARY KEY,
+               filename TEXT NOT NULL,
+               content BLOB NOT NULL);"
         )?;
         Ok(AppDatabase { conn })
     }
@@ -289,6 +304,43 @@ impl AppDatabase {
             .map(|c| c as usize)
     }
 
+    // -- attachments (Phase 23) -------------------------------------------
+
+    /// Store an attachment's bytes next to its conversation message.
+    pub fn insert_attachment(
+        &mut self,
+        message_id: i64,
+        filename: &str,
+        content: &[u8],
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO attachments (message_id, filename, content)
+             VALUES (?1, ?2, ?3)",
+            params![message_id, filename, content],
+        )?;
+        Ok(())
+    }
+
+    /// The attachment stored for a conversation message, if any.
+    pub fn attachment_for(&self, message_id: i64) -> Result<Option<Attachment>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT filename, content FROM attachments WHERE message_id = ?1",
+                params![message_id],
+                |r| {
+                    Ok(Attachment {
+                        filename: r.get(0)?,
+                        content: r.get(1)?,
+                    })
+                },
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })
+    }
+
     fn row_to_message(r: &rusqlite::Row<'_>) -> Result<Message, rusqlite::Error> {
         let dir: String = r.get(2)?;
         Ok(Message {
@@ -353,16 +405,84 @@ impl App {
         })
     }
 
+    /// Attach a real file and hand it to the node engine as a bundle
+    /// (Phase 23). The message body carries the standard
+    /// `[attachment: name (N bytes)]` marker; the bytes are stored in
+    /// the app database and can be written back with
+    /// `extract_attachment` — before or after delivery, that is DTN.
+    pub fn send_file(
+        &mut self,
+        peer: &Eid,
+        path: &Path,
+        lifetime: u64,
+    ) -> Result<Message, AppError> {
+        let content = std::fs::read(path)?;
+        let filename = path
+            .file_name()
+            .ok_or_else(|| {
+                AppError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "attachment path has no file name",
+                ))
+            })?
+            .to_string_lossy()
+            .into_owned();
+        validate_filename(&filename).map_err(|e| {
+            AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("unsafe attachment filename {filename:?}: {e}"),
+            ))
+        })?;
+        if content.len() > attachments::MAX_CONTENT_BYTES {
+            return Err(AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("attachment too large ({} bytes, max {})", content.len(), attachments::MAX_CONTENT_BYTES),
+            )));
+        }
+        let att = Attachment { filename: filename.clone(), content };
+        let body = attachments::marker(&att.filename, att.content.len());
+        let bundle = self.node.send(peer.clone(), att.encode(), lifetime)?;
+        let key = bundle_key(&bundle.id());
+        let id = self.db.insert_message(
+            &peer.as_uri(),
+            Direction::Out,
+            &body,
+            Some(&key),
+            dtn_storage::now(),
+        )?;
+        self.db.insert_attachment(id, &att.filename, &att.content)?;
+        Ok(Message {
+            id,
+            peer: peer.as_uri(),
+            direction: Direction::Out,
+            body,
+            created_at: dtn_storage::now(),
+            bundle_key: Some(key),
+        })
+    }
+
     /// Drain the node engine's pending inbox into conversations.
     /// Returns the newly delivered messages (already marked read =
     /// unread until the frontend calls `mark_read`). Payloads that are
     /// not valid UTF-8 are stored lossily-decoded; empty payloads are
     /// recorded as empty bodies so the bundle is still consumed.
+    /// DTNA1 attachment payloads (Phase 23) are decoded: the body
+    /// becomes the standard `[attachment: ...]` marker and the bytes
+    /// are persisted for `extract_attachment`.
     pub fn poll_inbox(&mut self) -> Result<Vec<Message>, AppError> {
         let inbox = self.node.inbox()?;
         let mut out = Vec::new();
         for bundle in inbox {
-            let body = String::from_utf8_lossy(bundle.payload().unwrap_or(&[])).to_string();
+            let payload = bundle.payload().unwrap_or(&[]);
+            // Attachment payloads (DTNA1) are decoded and their bytes
+            // persisted; anything else stays lossy text.
+            let (body, attachment) = match Attachment::decode(payload) {
+                Ok(a) => {
+                    let note = attachments::marker(&a.filename, a.content.len());
+                    (note, Some(a))
+                }
+                Err(_) => (String::from_utf8_lossy(payload).to_string(), None),
+            };
             let peer = bundle.primary.source_node.as_uri();
             let key = bundle_key(&bundle.id());
             let id = self.db.insert_message(
@@ -372,6 +492,9 @@ impl App {
                 Some(&key),
                 dtn_storage::now(),
             )?;
+            if let Some(a) = attachment {
+                self.db.insert_attachment(id, &a.filename, &a.content)?;
+            }
             self.node.store.mark_delivered(&bundle.id())?;
             out.push(Message {
                 id,
@@ -399,6 +522,34 @@ impl App {
 
     pub fn mark_read(&mut self, peer: &str) -> Result<usize, AppError> {
         Ok(self.db.mark_read(peer)?)
+    }
+
+    /// The attachment stored for a conversation message, if any.
+    pub fn attachment_for(&self, message_id: i64) -> Result<Option<Attachment>, AppError> {
+        Ok(self.db.attachment_for(message_id)?)
+    }
+
+    /// Write the attachment of a conversation message into `dest_dir`
+    /// byte-for-byte. The stored filename is re-validated, so nothing
+    /// can escape the destination directory no matter what was stored.
+    pub fn extract_attachment(
+        &self,
+        message_id: i64,
+        dest_dir: &Path,
+    ) -> Result<PathBuf, AppError> {
+        let att = self
+            .db
+            .attachment_for(message_id)?
+            .ok_or(AppError::NoSuchAttachment)?;
+        validate_filename(&att.filename).map_err(|e| {
+            AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("stored attachment filename unsafe: {e}"),
+            ))
+        })?;
+        let out = dest_dir.join(&att.filename);
+        std::fs::write(&out, &att.content)?;
+        Ok(out)
     }
 
     /// Conversation-list rendering for text frontends (CLI, TUI).
@@ -660,4 +811,106 @@ mod tests {
         cleanup(&db_a);
         cleanup(&db_b);
     }
+
+    #[test]
+    fn attachment_file_delivery_two_nodes() {
+        let (db_a, db_b) = (tmp_db("att-a"), tmp_db("att-b"));
+        let src = std::env::temp_dir().join(format!("dtn-app-att-src-{}-231.bin", std::process::id()));
+        let bytes: Vec<u8> = (0..=u8::MAX).chain([0u8; 64]).collect();
+        std::fs::write(&src, &bytes).unwrap();
+        {
+            let mut a = App::open(21, &db_a, Strategy::Epidemic).unwrap();
+            let mut b = App::open(22, &db_b, Strategy::Epidemic).unwrap();
+            let m = a.send_file(&b.eid(), &src, 3600).unwrap();
+            assert_eq!(m.direction, Direction::Out);
+            assert_eq!(bytes.len(), 320);
+            assert_eq!(m.body, "[attachment: dtn-app-att-src-".to_owned()
+                + &std::process::id().to_string() + "-231.bin (320 bytes)]");
+            // The encoded bundle really carries the DTNA1 payload.
+            let wire = a.node.store.all().unwrap()[0].data.clone();
+            let sent = dtn_bpv7::Bundle::decode(&wire).unwrap();
+            assert_eq!(&sent.payload().unwrap()[..5], &b"DTNA1"[..]);
+
+            assert!(b.node.receive(&wire).unwrap().is_some());
+            let new = b.poll_inbox().unwrap();
+            assert_eq!(new.len(), 1);
+            assert_eq!(new[0].body, m.body);
+            let att = b.attachment_for(new[0].id).unwrap().unwrap();
+            assert_eq!(att.filename, src.file_name().unwrap().to_string_lossy().as_ref());
+            assert_eq!(att.content, bytes);
+
+            // Extract writes the exact original bytes into dest_dir.
+            let dir = std::env::temp_dir().join(format!("dtn-app-att-out-{}-231", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let out = b.extract_attachment(new[0].id, &dir).unwrap();
+            assert_eq!(out.file_name().unwrap(), src.file_name().unwrap());
+            assert_eq!(std::fs::read(&out).unwrap(), bytes);
+            assert!(b.render_history(&m.peer).unwrap().contains("[attachment: "));
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+        cleanup(&db_a);
+        cleanup(&db_b);
+        let _ = std::fs::remove_file(&src);
+    }
+
+    #[test]
+    fn attachment_extract_refuses_unsafe_stored_name_and_missing_rows() {
+        let db = tmp_db("att-unsafe");
+        {
+            let mut app = App::open(23, &db, Strategy::Epidemic).unwrap();
+            assert!(
+                app.db.insert_attachment(1, "../evil.bin", b"bad").is_ok(),
+                "raw db insert is allowed (used to test the extract guard)"
+            );
+            let dir = std::env::temp_dir().join(format!("dtn-app-att-evil-{}-231", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let err = app.extract_attachment(1, &dir).unwrap_err();
+            assert!(matches!(err, AppError::Io(_)), "got: {err:?}");
+            assert!(!dir.join("evil.bin").exists(), "nothing may be written outside dest_dir");
+            assert!(matches!(
+                app.extract_attachment(99, &dir).unwrap_err(),
+                AppError::NoSuchAttachment
+            ));
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+        cleanup(&db);
+    }
+
+    #[test]
+    fn attachment_state_persists_across_reopen() {
+        let db = tmp_db("att-persist");
+        let src = std::env::temp_dir().join(format!("dtn-app-att-src-{}-232.txt", std::process::id()));
+        std::fs::write(&src, b"persist me").unwrap();
+        {
+            let mut a = App::open(24, &db, Strategy::Epidemic).unwrap();
+            a.send_file(&dtn_bpv7::Eid::dtn("bob"), &src, 3600).unwrap();
+        }
+        {
+            let app = App::open(24, &db, Strategy::Epidemic).unwrap();
+            let att = app.attachment_for(1).unwrap().unwrap();
+            assert_eq!(att.content, b"persist me");
+            assert!(app.attachment_for(2).unwrap().is_none());
+        }
+        cleanup(&db);
+        let _ = std::fs::remove_file(&src);
+    }
+
+    #[test]
+    fn plain_text_is_never_misread_as_attachment() {
+        let (db_a, db_b) = (tmp_db("plain-a"), tmp_db("plain-b"));
+        {
+            let mut a = App::open(25, &db_a, Strategy::Epidemic).unwrap();
+            let mut b = App::open(26, &db_b, Strategy::Epidemic).unwrap();
+            a.send_text(&b.eid(), "DTNA1 neighbour", 3600).unwrap();
+            let wire = a.node.store.all().unwrap()[0].data.clone();
+            b.node.receive(&wire).unwrap();
+            let new = b.poll_inbox().unwrap();
+            assert_eq!(new.len(), 1);
+            assert_eq!(new[0].body, "DTNA1 neighbour");
+            assert!(b.attachment_for(new[0].id).unwrap().is_none());
+        }
+        cleanup(&db_a);
+        cleanup(&db_b);
+    }
 }
+

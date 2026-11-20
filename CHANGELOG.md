@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.22.0 (2026-11-20)
+
+Phase 23 — file attachments over the DTN message channel (the first
+"Next" item of the Phase 22 roadmap).
+
+- dtn-app::attachments (new module): the DTNA1 attachment payload
+  format — [magic "DTNA1"][u16 BE filename len][filename][u64 BE
+  content len][content] — with strict decode: exact lengths, no
+  trailing bytes, filename capped at 255 bytes and validated safe
+  (no path separators, no "..", no control or NUL bytes, non-UTF-8
+  fails closed), content length must match the remaining bytes
+  exactly, and an 8 MiB content cap enforced on the declared length
+  before any allocation (a single attachment can never push one
+  bundle past the 16 MiB transport frame limit).
+- dtn-app: App::send_file(peer, path, lifetime) reads a real file,
+  validates the filename, encodes a DTNA1 payload and hands it to the
+  node engine as a normal bundle (store-carry-forward, BPSec,
+  gateways — every existing transport carries it unchanged); the
+  conversation records the standard "~BT[attachment: name (N bytes)]~BT"
+  marker. poll_inbox decodes DTNA1 payloads on delivery and persists
+  the bytes in a new attachments table (message_id -> filename +
+  content BLOB) next to the conversation rows. App::attachment_for
+  exposes the bytes to frontends; App::extract_attachment writes
+  them byte-for-byte into a destination directory, re-validating the
+  stored filename so nothing can escape the directory. Plain text is
+  never misread as an attachment (magic mismatch falls back to lossy
+  text), and non-attachment behavior is unchanged.
+- cli: dtn-link chat send-file <alias|eid> <path> [lifetime] and
+  dtn-link chat extract <message-id> <dest-dir>; usage text updated,
+  version string 0.22.0.
+- 19 new tests: DTNA1 codec roundtrip (binary-safe incl. zero bytes,
+  empty content), exact wire layout, all rejections (short header,
+  bad magic, truncated filename length/filename, missing length
+  bytes, short/overshooting content, over-cap declared length before
+  allocation, non-UTF-8 filename), filename validation matrix
+  (unicode and .hidden accepted; "..", separators, NUL, control
+  chars, 256 bytes rejected), marker format, full two-node file
+  delivery over the real node engine with byte-identical extraction,
+  extract refusing an unsafe stored name without writing, missing
+  attachment rows, attachment persistence across reopen, and plain
+  text never being misread as an attachment.
+- docs: apps.md gains the attachments section + CLI lines and honest
+  scope update; architecture.md application layer updated (Phase 23)
+  and roadmap advanced; README status line 1-23 with the
+  attachments row; workspace bumped to 0.22.0.
+- Honest scope: one attachment = one bundle (no chunked multi-bundle
+  resume for multi-MB files; the 8 MiB cap keeps single-bundle
+  delivery off the too-large path), no MIME type metadata yet, and
+  the dtn-ffi JSON surface does not carry attachment bytes yet — the
+  platform shells receive the "~BT[attachment: ...]~BT" marker text and
+  use extract via the CLI; an FFI attachment API is the natural next
+  step.
+
+
 ## 0.21.0 (2026-11-19)
 
 Phase 22 — the iOS (Swift bridge) shell: the third consumer of the

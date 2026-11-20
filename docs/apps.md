@@ -22,6 +22,13 @@ instead of re-implementing chat state per platform.
   delivered flag prevents double insertion).
 - **Text rendering** — `render_conversations()` / `render_history()`
   for text frontends (the CLI uses them directly).
+- **Attachments (Phase 23)** — `App::send_file()` reads a real file
+  and sends it as a DTNA1 attachment payload in one normal bundle;
+  `poll_inbox()` decodes it on delivery and stores the bytes;
+  `App::extract_attachment()` writes them back byte-for-byte.
+  Filenames are strictly validated (no path separators, no "..",
+  no control characters, 255-byte cap) and content is capped at
+  8 MiB, so one attachment always fits in one bundle.
 
 The node engine keeps doing what it does best — store-carry-forward,
 dedup, expiry, BPSec signing/verification — the app layer only adds
@@ -35,6 +42,8 @@ is DTN, not a bug.
     dtn-link chat contacts add alice dtn://alice-node
     dtn-link chat contacts list
     dtn-link chat send alice "see you at the pass"
+    dtn-link chat send-file alice report.pdf
+    dtn-link chat extract 3 ./downloads
     dtn-link chat poll
     dtn-link chat list            # conversation list with unread badges
     dtn-link chat list alice      # one conversation, marks it read
@@ -73,11 +82,16 @@ println!("unread: {}", app.unread_total()?);
 Platform UI shells build on this crate through the Phase 19 FFI
 boundary (`dtn-ffi`). The desktop terminal shell `dtn-shell`
 (Phase 20, shells/desktop) is the first of them; see docs/shell.md.
+Honest scope of the FFI for attachments: the JSON conversation layers
+show the `[attachment: ...]` marker text; an FFI API for the bytes
+(native-side extract) is future work on the same boundary.
 
 ## Honest scope
 
 - Text bodies are stored lossily-decoded UTF-8; arbitrary payloads are
-  consumed, not dropped (binary attachments are future work).
+  consumed, not dropped. Binary file attachments landed in Phase 23
+  (one file per bundle, 8 MiB cap; no chunked multi-bundle resume for
+  larger files, no MIME type metadata yet).
 - An inbound message is "delivered" locally when it lands in the
   conversation; there are no remote read receipts or per-bundle
   delivery acknowledgments back to the sender yet.
