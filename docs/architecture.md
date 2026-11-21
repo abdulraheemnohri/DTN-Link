@@ -2,7 +2,7 @@
 
 ## Layered model (target)
 
-1. Application layer — messaging, files, alerts [messaging + attachments implemented — dtn-app (Phases 18/23); alerts future]
+1. Application layer — messaging, files, alerts [messaging + attachments + remote read receipts implemented — dtn-app (Phases 18/23/24); alerts future]
 2. Identity layer — Ed25519 node identities [implemented]
 3. Bundle layer — BPv7 (RFC 9171) creation/validation [implemented]
 4. Security layer — BPSec (RFC 9172) [BIB + BCB implemented, RFC 9173 contexts BIB-HMAC-SHA2 / BCB-AES-GCM]
@@ -14,7 +14,7 @@
 10. Federation layer — inter-region routing via gateway peers [implemented — dtn-federation (Phase 14)]
 11. Platform shell boundary — C ABI over the application layer [implemented — dtn-ffi (Phase 19); desktop shell dtn-shell (Phase 20); Android JNI shell (Phase 21); iOS Swift shell (Phase 22)]
 
-## Current implementation (Phases 1-22)
+## Current implementation (Phases 1-24)
 
 ```
 +--------------------------------------------------------+
@@ -305,10 +305,27 @@ in the store for the next contact. Phase 23 added file attachments:
 `send_file()` sends a real file as one DTNA1 attachment payload, the
 bytes persist in the app database on delivery, and
 `extract_attachment()` writes them back with the filename re-validated
-(no path traversal possible). See docs/apps.md. Honest scope:
-this is the shared engine, not the platform UI shells — GUI toolkits,
-chunked multi-bundle attachments, MIME metadata and remote read
-receipts are future work.
+(no path traversal possible).
+
+### Remote read receipts (Phase 24)
+
+dtn-app::receipts closes the feedback loop of the conversation: after
+reading, `App::send_read_receipts(&peer, lifetime)` sends ONE store-
+carry-forward bundle whose DTNR1 payload names the exact bundles
+(`source|creation-ts|seq` keys) that carried the peer's inbound
+messages — the same correlation strings stored on the sender's
+outbound rows. On the other side,
+`poll_inbox_with_receipts()` decodes arriving DTNR1 receipts,
+confirms exactly the matching outbound conversation rows (spoofed or
+foreign keys confirm nothing) and returns them as
+`ReceivedReceipt`s; receipts never become chat rows and
+`render_history` shows `✓read` on confirmed outbound messages.
+Strict decode (exact lengths, no trailing bytes, entry count ≤ 256,
+keys bounded + UTF-8, no control characters); malformed receipts
+degrade to lossy chat text. The confirmed-read column migrates older
+app databases in place. See docs/apps.md. Honest scope: receipts
+confirm READ state only (not per-hop delivery), and the `dtn-ffi`
+JSON surface does not expose receipt state yet.
 
 ### FFI boundary (Phase 19)
 
@@ -436,7 +453,7 @@ native library and an Apple toolchain, so the wire/storage behavior
 underneath is verified by the Rust-side dtn-ffi tests and the
 desktop self test (as for the Android JNI shim); the model/JSON
 layer is covered by the XCTest suite. Background sync service,
-notifications, attachments and remote read receipts remain future
+notifications, attachments and the receipts FFI surface remain future
 work on the same ABI.
 
 ## Roadmap
@@ -457,4 +474,6 @@ work on the same ABI.
 - Done: Phase 21 Android shell — shells/android (Kotlin) embeds the real libdtn_ffi on Android through the new dtn-ffi jni feature (Java_link_dtn_shell_Native_* shim over the exact dtn_app_* C ABI), with the safe DtnFfi wrapper, typed JSON models, a functional chat MainActivity and JVM unit tests over the FFI JSON shapes (docs/android.md).
 - Done: Phase 22 iOS shell — shells/ios (Swift/SwiftPM) embeds the real libdtn_ffi on iOS through the CDtnFfi C target and the DtnFfi Swift bridge over the exact dtn_app_* C ABI, with typed JSON models, a @MainActor ChatController, a SwiftUI chat example and an XCTest model suite that runs without the native library (docs/ios.md).
 - Done: Phase 23 attachments — dtn-app::attachments DTNA1 payload format (strict decode, safe-filename validation, 8 MiB cap), App::send_file / attachment_for / extract_attachment, attachment bytes persisted in the app database, chat CLI send-file/extract (docs/apps.md).
-- Next: remote read receipts, TLS (RFC 9174 §4.4), web-of-trust, TLE-driven pass prediction, a network-wide management plane, background sync services and push notifications on the mobile shells.
+- Done: Phase 24 remote read receipts — dtn-app::receipts DTNR1 payload format (strict decode, bundle-key correlation, spoof-proof confirmation), App::send_read_receipts / poll_inbox_with_receipts / message_confirmed, ✓read rendering, in-place database migration (docs/apps.md).
+- Next: TLS (RFC 9174 §4.4), web-of-trust, TLE-driven pass prediction, a network-wide management plane, background sync services and push notifications on the mobile shells, an FFI/receipts surface for the platform shells.
+

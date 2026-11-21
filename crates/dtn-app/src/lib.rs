@@ -24,11 +24,18 @@
 //!
 //! Honest scope: this is the shared engine, not the platform UI shells
 //! themselves. File attachments arrived in Phase 23 (`send_file` /
-//! `extract_attachment`); GUI toolkits and delivery receipts from the
-//! remote side remain future work.
+//! `extract_attachment`); remote read receipts arrived in Phase 24
+//! (`send_read_receipts` / `poll_inbox_with_receipts`): one receipt
+//! bundle acknowledges exactly the bundles that carried a peer's
+//! conversations, and `render_history` shows `✓read` on confirmed
+//! outbound rows. GUI toolkits and an FFI receipts surface remain
+//! future work.
 
 mod attachments;
 pub use attachments::{validate_filename, Attachment, AttachmentError};
+
+mod receipts;
+pub use receipts::{ReadReceipt, ReceiptError, ReceivedReceipt};
 
 use dtn_bpv7::Eid;
 use dtn_core::{Node, NodeError, Strategy};
@@ -153,13 +160,20 @@ impl AppDatabase {
                body TEXT NOT NULL,
                created_at INTEGER NOT NULL,
                bundle_key TEXT,
-               read INTEGER NOT NULL DEFAULT 0);
+               read INTEGER NOT NULL DEFAULT 0,
+               confirmed_read INTEGER NOT NULL DEFAULT 0);
              CREATE INDEX IF NOT EXISTS idx_messages_peer ON messages(peer, id);
              CREATE TABLE IF NOT EXISTS attachments (
                message_id INTEGER PRIMARY KEY,
                filename TEXT NOT NULL,
                content BLOB NOT NULL);"
         )?;
+        // Older databases migrate in place (Phase 24): a fresh schema
+        // already carries confirmed_read, so the duplicate-column error
+        // here is the expected fresh-database path.
+        let _ = conn.execute_batch(
+            "ALTER TABLE messages ADD COLUMN confirmed_read INTEGER NOT NULL DEFAULT 0;",
+        );
         Ok(AppDatabase { conn })
     }
 
@@ -302,6 +316,67 @@ impl AppDatabase {
                 r.get::<_, i64>(0)
             })
             .map(|c| c as usize)
+    }
+
+    // -- read receipts (Phase 24) -------------------------------------------
+
+    /// Bundle keys of this peer's inbound conversation messages that
+    /// have not been acknowledged with a read receipt yet.
+    pub fn unacked_inbound_keys(&self, peer: &str) -> Result<Vec<(i64, String)>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, bundle_key FROM messages
+             WHERE peer = ?1 AND direction = 'in'
+               AND confirmed_read = 0 AND bundle_key IS NOT NULL
+             ORDER BY id",
+        )?;
+        let rows = stmt.query_map(params![peer], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        rows.collect()
+    }
+
+    /// Mark the inbound message ids as receipt-acknowledged (local
+    /// bookkeeping only; the receipt bundle is the message to the peer).
+    pub fn confirm_inbound(&mut self, ids: &[i64]) -> Result<(), rusqlite::Error> {
+        for id in ids {
+            self.conn.execute(
+                "UPDATE messages SET confirmed_read = 1 WHERE id = ?1",
+                params![id],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Apply a received read receipt: confirm the out messages whose
+    /// bundle_key matches one of the acknowledged keys. Unknown keys
+    /// (spoofed or belonging to a foreign conversation) match nothing.
+    /// Returns the number of rows confirmed.
+    pub fn confirm_out_read(&mut self, keys: &[String]) -> Result<usize, rusqlite::Error> {
+        let mut n = 0usize;
+        for key in keys {
+            n += self.conn.execute(
+                "UPDATE messages SET confirmed_read = 1
+                 WHERE direction = 'out' AND bundle_key = ?1 AND confirmed_read = 0",
+                params![key],
+            )?;
+        }
+        Ok(n)
+    }
+
+    /// Whether this outbound message has been confirmed read by its
+    /// peer (read-receipt state from Phase 24).
+    pub fn message_confirmed(&self, id: i64) -> Result<bool, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT confirmed_read FROM messages WHERE id = ?1",
+                params![id],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|v| v != 0)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(false),
+                other => Err(other),
+            })
     }
 
     // -- attachments (Phase 23) -------------------------------------------
@@ -461,19 +536,64 @@ impl App {
         })
     }
 
+    /// Send read receipts for every inbound message of this peer that
+    /// has not been acknowledged yet (Phase 24). Reading itself stays
+    /// a separate action (`db.mark_read`); this acknowledges. The
+    /// receipt names the exact bundles that carried the messages, so
+    /// the remote side confirms precisely those conversation rows.
+    /// Returns the number of acknowledged messages; with nothing
+    /// pending no bundle is created and Ok(0) is returned.
+    pub fn send_read_receipts(&mut self, peer: &Eid, lifetime: u64) -> Result<usize, AppError> {
+        let pending = self.db.unacked_inbound_keys(&peer.as_uri())?;
+        if pending.is_empty() {
+            return Ok(0);
+        }
+        let keys: Vec<String> = pending.iter().map(|(_, k)| k.clone()).collect();
+        let receipt = ReadReceipt::new(keys.clone(), dtn_storage::now())
+            .map_err(|e| AppError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())))?;
+        self.node.send(peer.clone(), receipt.encode(), lifetime)?;
+        self.db.confirm_inbound(&pending.iter().map(|(id, _)| *id).collect::<Vec<_>>())?;
+        Ok(keys.len())
+    }
+
     /// Drain the node engine's pending inbox into conversations.
-    /// Returns the newly delivered messages (already marked read =
-    /// unread until the frontend calls `mark_read`). Payloads that are
-    /// not valid UTF-8 are stored lossily-decoded; empty payloads are
-    /// recorded as empty bodies so the bundle is still consumed.
-    /// DTNA1 attachment payloads (Phase 23) are decoded: the body
-    /// becomes the standard `[attachment: ...]` marker and the bytes
-    /// are persisted for `extract_attachment`.
+    /// Returns the newly delivered messages (still unread until the
+    /// frontend calls `mark_read`). Payloads that are not valid UTF-8
+    /// are stored lossily-decoded; empty payloads are recorded as
+    /// empty bodies so the bundle is still consumed. DTNA1 attachment
+    /// payloads (Phase 23) are decoded: the body becomes the standard
+    /// `[attachment: ...]` marker and the bytes are persisted for
+    /// `extract_attachment`. DTNR1 read receipts (Phase 24) are
+    /// applied and returned, never shown as chat messages.
     pub fn poll_inbox(&mut self) -> Result<Vec<Message>, AppError> {
+        Ok(self.poll_inbox_with_receipts()?.0)
+    }
+
+    /// As `poll_inbox`, additionally returning the read receipts that
+    /// arrived in the same drain (after being applied to the
+    /// conversations). Receipts never become conversation rows.
+    pub fn poll_inbox_with_receipts(
+        &mut self,
+    ) -> Result<(Vec<Message>, Vec<ReceivedReceipt>), AppError> {
         let inbox = self.node.inbox()?;
         let mut out = Vec::new();
+        let mut receipts = Vec::new();
         for bundle in inbox {
             let payload = bundle.payload().unwrap_or(&[]);
+            // Read receipts (DTNR1) are applied, not displayed. A
+            // receipt acknowledging bundles this node never sent (or
+            // keys from a foreign conversation) confirms nothing.
+            if let Ok(r) = ReadReceipt::decode(payload) {
+                let from = bundle.primary.source_node.as_uri();
+                let confirmed = self.db.confirm_out_read(&r.keys)?;
+                self.node.store.mark_delivered(&bundle.id())?;
+                receipts.push(ReceivedReceipt {
+                    from,
+                    acked_at: r.acked_at,
+                    confirmed,
+                });
+                continue;
+            }
             // Attachment payloads (DTNA1) are decoded and their bytes
             // persisted; anything else stays lossy text.
             let (body, attachment) = match Attachment::decode(payload) {
@@ -505,7 +625,7 @@ impl App {
                 bundle_key: Some(key),
             });
         }
-        Ok(out)
+        Ok((out, receipts))
     }
 
     pub fn conversations(&self) -> Result<Vec<Conversation>, AppError> {
@@ -522,6 +642,12 @@ impl App {
 
     pub fn mark_read(&mut self, peer: &str) -> Result<usize, AppError> {
         Ok(self.db.mark_read(peer)?)
+    }
+
+    /// Whether this outbound message has been confirmed read by its
+    /// peer via a received read receipt (Phase 24).
+    pub fn message_confirmed(&self, id: i64) -> Result<bool, AppError> {
+        Ok(self.db.message_confirmed(id)?)
     }
 
     /// The attachment stored for a conversation message, if any.
@@ -588,7 +714,16 @@ impl App {
                 Direction::Out => "you",
                 Direction::In => "them",
             };
-            s.push_str(&format!("[{who}] {}\n", m.body));
+            // Phase 24: a confirmed read receipt renders as ✓read on
+            // the outbound row the receipt acknowledged.
+            let ack = if matches!(m.direction, Direction::Out)
+                && self.message_confirmed(m.id).unwrap_or(false)
+            {
+                " [✓read]"
+            } else {
+                ""
+            };
+            s.push_str(&format!("[{who}]{} {}\n", ack, m.body));
         }
         Ok(s)
     }
@@ -613,6 +748,19 @@ mod tests {
         let mut app = db.to_path_buf();
         app.set_extension("app");
         let _ = std::fs::remove_file(app);
+    }
+
+    /// Find the stored bundle whose payload starts with `magic`; the
+    /// store row order is not guaranteed, so [0] is not enough.
+    fn find_bundle_with_payload(bytes: Vec<Vec<u8>>, magic: &[u8]) -> Vec<u8> {
+        bytes
+            .into_iter()
+            .find(|d| {
+                dtn_bpv7::Bundle::decode(d)
+                    .map(|b| b.payload().map(|p| p.starts_with(magic)).unwrap_or(false))
+                    .unwrap_or(false)
+            })
+            .expect("a bundle with the expected payload magic is in the store")
     }
 
     #[test]
@@ -912,5 +1060,229 @@ mod tests {
         cleanup(&db_a);
         cleanup(&db_b);
     }
+
+    // -- Phase 24: remote read receipts --------------------------------------
+
+    #[test]
+    fn read_receipt_end_to_end_two_nodes() {
+        let (db_a, db_b) = (tmp_db("rr-a"), tmp_db("rr-b"));
+        {
+            let mut a = App::open(31, &db_a, Strategy::Epidemic).unwrap();
+            let mut b = App::open(32, &db_b, Strategy::Epidemic).unwrap();
+            a.send_text(&b.eid(), "first", 3600).unwrap();
+            a.send_text(&b.eid(), "second", 3600).unwrap();
+
+            // Carry both bundles to b and deliver them.
+            for bundle in a.node.store.all().unwrap() {
+                assert!(b.node.receive(&bundle.data.clone()).unwrap().is_some());
+            }
+            let new = b.poll_inbox().unwrap();
+            assert_eq!(new.len(), 2);
+            assert_eq!(b.unread_total().unwrap(), 2);
+
+            // b acknowledges: one receipt bundle for both messages.
+            let store_before = b.node.store.count().unwrap();
+            assert_eq!(b.send_read_receipts(&a.eid(), 3600).unwrap(), 2);
+            assert_eq!(
+                b.node.store.count().unwrap(),
+                store_before + 1,
+                "exactly one receipt bundle added"
+            );
+            // The receipt payload really is DTNR1 with both keys.
+            let all = b.node.store.all().unwrap();
+            let wire = find_bundle_with_payload(
+                all.iter().map(|r| r.data.clone()).collect(),
+                b"DTNR1",
+            );
+            let sent = dtn_bpv7::Bundle::decode(&wire).unwrap();
+            assert_eq!(&sent.payload().unwrap()[..5], &b"DTNR1"[..]);
+
+            // Idempotent: everything already acknowledged.
+            assert_eq!(b.send_read_receipts(&a.eid(), 3600).unwrap(), 0);
+            assert_eq!(
+                b.node.store.count().unwrap(),
+                store_before + 1,
+                "no second receipt bundle"
+            );
+
+            // Carry the receipt back to a.
+            assert!(a.node.receive(&wire).unwrap().is_some());
+            let (msgs, receipts) = a.poll_inbox_with_receipts().unwrap();
+            assert!(msgs.is_empty(), "a receipt is never a chat message");
+            assert_eq!(receipts.len(), 1);
+            assert_eq!(receipts[0].from, b.eid().as_uri());
+            assert_eq!(receipts[0].confirmed, 2, "both out rows confirmed");
+            assert_eq!(a.message_count().unwrap(), 2, "no receipt rows");
+
+            // Correlation is by bundle key: exactly the two outs.
+            let hist = a.history(&b.eid().as_uri()).unwrap();
+            assert!(a.message_confirmed(hist[0].id).unwrap());
+            assert!(a.message_confirmed(hist[1].id).unwrap());
+            // Unread state of a's own inbound side is untouched (none here).
+            assert_eq!(a.unread_total().unwrap(), 0);
+
+            // Rendering shows the ✓read badge.
+            let text = a.render_history(&b.eid().as_uri()).unwrap();
+            assert_eq!(text.matches("[✓read]").count(), 2, "text: {text}");
+        }
+        cleanup(&db_a);
+        cleanup(&db_b);
+    }
+
+    #[test]
+    fn receipt_with_one_message_confirms_only_that_row() {
+        let (db_a, db_b) = (tmp_db("rr-one"), tmp_db("rr-one-b"));
+        {
+            let mut a = App::open(33, &db_a, Strategy::Epidemic).unwrap();
+            let mut b = App::open(34, &db_b, Strategy::Epidemic).unwrap();
+            a.send_text(&b.eid(), "hello", 3600).unwrap();
+            let wire = a.node.store.all().unwrap()[0].data.clone();
+            b.node.receive(&wire).unwrap();
+            b.poll_inbox().unwrap();
+            b.send_read_receipts(&a.eid(), 3600).unwrap();
+            let wire = find_bundle_with_payload(
+                b.node.store.all().unwrap().iter().map(|r| r.data.clone()).collect(),
+                b"DTNR1",
+            );
+            a.node.receive(&wire).unwrap();
+            let (_, receipts) = a.poll_inbox_with_receipts().unwrap();
+            assert_eq!(receipts[0].confirmed, 1);
+        }
+        cleanup(&db_a);
+        cleanup(&db_b);
+    }
+
+    #[test]
+    fn spoofed_or_foreign_receipt_keys_confirm_nothing() {
+        let (db_a, db_c) = (tmp_db("rr-spoof-a"), tmp_db("rr-spoof-c"));
+        {
+            let mut a = App::open(35, &db_a, Strategy::Epidemic).unwrap();
+            let mut c = App::open(37, &db_c, Strategy::Epidemic).unwrap();
+            a.send_text(&c.eid(), "hello", 3600).unwrap();
+            let unconfirmed = a.history(&c.eid().as_uri()).unwrap()[0].id;
+
+            // A receipt "from" c names bundles a never sent: nothing
+            // may be confirmed.
+            let spoof = ReadReceipt {
+                keys: vec!["dtn://someone-else|1|1".to_string()],
+                acked_at: 42,
+            };
+            c.node.send(a.eid(), spoof.encode(), 3600).unwrap();
+            let wire = c.node.store.all().unwrap()[0].data.clone();
+            a.node.receive(&wire).unwrap();
+            let (_, receipts) = a.poll_inbox_with_receipts().unwrap();
+            assert_eq!(receipts[0].confirmed, 0);
+            assert!(!a.message_confirmed(unconfirmed).unwrap());
+        }
+        cleanup(&db_a);
+        cleanup(&db_c);
+    }
+
+    #[test]
+    fn malformed_receipt_payload_is_recorded_as_plain_text() {
+        let (db_a, db_b) = (tmp_db("rr-bad"), tmp_db("rr-bad-b"));
+        {
+            let mut a = App::open(38, &db_a, Strategy::Epidemic).unwrap();
+            let mut b = App::open(39, &db_b, Strategy::Epidemic).unwrap();
+            a.send_text(&b.eid(), "real", 3600).unwrap();
+            let wire = a.node.store.all().unwrap()[0].data.clone();
+            b.node.receive(&wire).unwrap();
+            b.poll_inbox().unwrap();
+
+            // Corrupted receipt (bad magic byte) must degrade to lossy
+            // text, never crash or silently disappear.
+            b.node.send(a.eid(), b"DTNR2garbage".to_vec(), 3600).unwrap();
+            let wire = find_bundle_with_payload(
+                b.node.store.all().unwrap().iter().map(|r| r.data.clone()).collect(),
+                b"DTNR2garbage",
+            );
+            a.node.receive(&wire).unwrap();
+            let (msgs, receipts) = a.poll_inbox_with_receipts().unwrap();
+            assert!(receipts.is_empty());
+            assert_eq!(msgs.len(), 1);
+            assert_eq!(msgs[0].direction, Direction::In);
+            assert!(msgs[0].body.contains("DTNR2garbage"));
+        }
+        cleanup(&db_a);
+        cleanup(&db_b);
+    }
+
+    #[test]
+    fn receipts_and_attachments_coexist_in_one_poll() {
+        let (db_a, db_b) = (tmp_db("rr-mix"), tmp_db("rr-mix-b"));
+        {
+            let mut a = App::open(41, &db_a, Strategy::Epidemic).unwrap();
+            let mut b = App::open(42, &db_b, Strategy::Epidemic).unwrap();
+            a.send_text(&b.eid(), "text", 3600).unwrap();
+            let wire = a.node.store.all().unwrap()[0].data.clone();
+            b.node.receive(&wire).unwrap();
+            b.poll_inbox().unwrap();
+
+            // b's receipt is a DTNR1 bundle whose magic differs from
+            // DTNA1: both decoders must route independently.
+            b.send_read_receipts(&a.eid(), 3600).unwrap();
+            assert!(
+                b.db.unacked_inbound_keys(&a.eid().as_uri()).unwrap().is_empty(),
+                "b's inbound rows are all acknowledged"
+            );
+            let wire = find_bundle_with_payload(
+                b.node.store.all().unwrap().iter().map(|r| r.data.clone()).collect(),
+                b"DTNR1",
+            );
+            a.node.receive(&wire).unwrap();
+            let (_, receipts) = a.poll_inbox_with_receipts().unwrap();
+            assert_eq!(receipts.len(), 1);
+            assert_eq!(receipts[0].confirmed, 1);
+
+            // The plain-text marker never leaks from the receipt path.
+            assert!(a.poll_inbox().unwrap().is_empty());
+        }
+        cleanup(&db_a);
+        cleanup(&db_b);
+    }
+
+    #[test]
+    fn read_receipt_state_persists_across_reopen() {
+        let (db_a, db_b) = (tmp_db("rr-persist-a"), tmp_db("rr-persist-b"));
+        let peer_uri;
+        {
+            let mut a = App::open(43, &db_a, Strategy::Epidemic).unwrap();
+            let mut b = App::open(44, &db_b, Strategy::Epidemic).unwrap();
+            peer_uri = b.eid().as_uri();
+            a.send_text(&b.eid(), "persist", 3600).unwrap();
+            let wire = a.node.store.all().unwrap()[0].data.clone();
+            b.node.receive(&wire).unwrap();
+            b.poll_inbox().unwrap();
+            b.send_read_receipts(&a.eid(), 3600).unwrap();
+            let wire = find_bundle_with_payload(
+                b.node.store.all().unwrap().iter().map(|r| r.data.clone()).collect(),
+                b"DTNR1",
+            );
+            a.node.receive(&wire).unwrap();
+            a.poll_inbox_with_receipts().unwrap();
+        }
+        {
+            let a = App::open(43, &db_a, Strategy::Epidemic).unwrap();
+            let hist = a.history(&peer_uri).unwrap();
+            assert!(
+                !hist.is_empty() && a.message_confirmed(hist[0].id).unwrap(),
+                "confirmed-read state survives reopen"
+            );
+        }
+        cleanup(&db_a);
+        cleanup(&db_b);
+    }
+
+    #[test]
+    fn send_read_receipts_without_unread_creates_nothing() {
+        let db = tmp_db("rr-empty");
+        {
+            let mut app = App::open(45, &db, Strategy::Epidemic).unwrap();
+            assert_eq!(app.send_read_receipts(&Eid::dtn("bob"), 3600).unwrap(), 0);
+            assert_eq!(app.node.store.count().unwrap(), 0);
+        }
+        cleanup(&db);
+    }
 }
+
 

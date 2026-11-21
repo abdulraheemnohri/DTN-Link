@@ -9,7 +9,7 @@ without requiring a SIM card, cellular subscription or Wi-Fi router for every
 communication. It uses Bundle Protocol v7 (RFC 9171), store-carry-forward
 routing, modular physical transport adapters and optional internet gateways.
 
-## Status: Phases 1-23 (core, transports, security, adapters, gateways, diagnostics, federation, apps + attachments, ffi, desktop + android + ios shells)
+## Status: Phases 1-24 (core, transports, security, adapters, gateways, diagnostics, federation, apps + attachments + read receipts, ffi, desktop + android + ios shells)
 
 | Component | Status |
 |---|---|
@@ -32,6 +32,7 @@ routing, modular physical transport adapters and optional internet gateways.
 | Interop + performance benchmark suite | implemented + tested (crates/dtn-bench) |
 | Diagnostics: health reports + kind-tagged contact history with per-contact bundle counters (`dtn-link doctor`) | implemented + tested (crates/dtn-diagnostics) |
 | Platform app engine: contacts, conversations, unread tracking, poll inbox, file attachments (`dtn-link chat send-file` / `extract`) | implemented + tested (crates/dtn-app) |
+| Remote read receipts (DTNR1 receipt bundles, bundle-key correlation, ✓read rendering) | implemented + tested (crates/dtn-app::receipts) |
 | C ABI / FFI over the app engine for platform UI shells (`libdtn_ffi` + `dtn_app_ffi.h`) | implemented + tested (crates/dtn-ffi) |
 | CLI | implemented — init/status/send/receive/bundles/chat (+ send-file/extract)/forward/daemon/doctor/verify/keyring/encrypt/decrypt/decode/federation |
 | RFC 9173 default contexts: BIB-HMAC-SHA2 (ctx 1), BCB-AES-GCM with primary-block AAD (ctx 2) | implemented + tested (crates/dtn-bpsec::rfc9173) |
@@ -119,3 +120,4 @@ See [docs/architecture.md](docs/architecture.md),
 ## License
 
 MIT
+

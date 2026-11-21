@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.23.0 (2026-11-21)
+
+Phase 24 — remote read receipts over the DTN message channel (the
+second "Next" item of the Phase 23 roadmap).
+
+- dtn-app::receipts (new module): the DTNR1 read-receipt payload
+  format — [magic "DTNR1"][u16 BE entry count][per entry: u16 BE
+  bundle-key len + key bytes][u64 BE ack timestamp] — with strict
+  decode: exact lengths, no trailing bytes, entry count capped at
+  256, every bundle key non-empty, at most 256 bytes and valid UTF-8
+  with no control characters. Receipts never become conversation
+  rows.
+- dtn-app: App::send_read_receipts(peer, lifetime) acknowledges every
+  inbound message of the peer that carries no receipt yet (one
+  receipt bundle, nothing created when the list is empty) and flips
+  local ack bookkeeping so nothing is acknowledged twice. Reading
+  itself stays the existing mark_read; acknowledging is this
+  separate, explicit step over the DTN. poll_inbox_with_receipts()
+  decodes arriving DTNR1 payloads before the attachment path,
+  confirms exactly the outbound conversation rows whose bundle_key
+  matches an acknowledged key (the `source|creation-ts|seq`
+  correlation strings stored since Phase 18 — no clock agreement
+  needed, spoofed/foreign keys confirm nothing) and returns the
+  ReceivedReceipts; poll_inbox() keeps its exact old signature and
+  behavior for callers that do not care. db: new confirmed_read
+  column on messages, migrated in place on old databases (fresh
+  schemas carry it from CREATE TABLE); message_confirmed(id)
+  exposes per-row state to frontends. render_history() renders
+  confirmed outbound rows with a [✓read] badge.
+- 13 new tests: DTNR1 codec roundtrip (incl. the 256-entry cap and
+  u64::MAX timestamps), exact wire layout, all rejections (short
+  header, bad magic, over-cap entry count before allocation,
+  zero-length/over-long/non-UTF-8/control-character keys, truncated
+  key/count/timestamp bytes, trailing bytes), full two-node receipt
+  cycle over the real node engine (2 messages, one receipt both ways,
+  idempotent second ack, no receipt chat rows, both rows confirmed,
+  [✓read] rendering), single-message receipt confirming exactly one
+  row, spoofed/foreign keys confirming nothing, a malformed receipt
+  payload degrading to lossy chat text, receipts and attachments
+  routing independently in one poll, receipt state persisting across
+  reopen, and the empty-ack fast path creating no bundle.
+- docs: apps.md gains the read-receipts section (wire format,
+  send/receive example, CLI note) with the honest scope updated;
+  architecture.md application layer + roadmap advanced (Phase 24);
+  README status row added; workspace bumped to 0.23.0.
+- Honest scope: a receipt says the peer READ the messages, nothing
+  about per-hop delivery; the acknowledgement is engine-level — the
+  dtn-ffi JSON surface does not expose confirmed-read state yet
+  (the CLI's chat list shows the [✓read] badges; an
+  dtn_app_message_confirmed entry point is the natural next step),
+  and the mobile shells pick the badges up through the FFI once that
+  lands.
+
+
 ## 0.22.0 (2026-11-20)
 
 Phase 23 — file attachments over the DTN message channel (the first
@@ -741,3 +795,4 @@ Phases 2-4 — multi-hop forwarding, hybrid routing, TCP transport.
 
 Phase 1 — Rust core foundation (BPv7 CBOR, identity, SQLite store, node
 engine, CLI, CI).
+
