@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.24.0 (2026-11-22)
+
+Phase 25 — web-of-trust key introductions (the next "Next" item of
+the Phase 24 roadmap).
+
+- dtn-keyring::wot (new module): the DTNWI1 introduction announcement
+  wire format — [magic "DTNWI1"][u16 BE introducer len + introducer
+  EID][u16 BE target len + introduced EID][32-byte introduced key]
+  [u64 BE signed_at][64-byte Ed25519 signature by the introducer] —
+  with strict decode: exact field lengths, no trailing bytes,
+  non-empty EIDs, valid Ed25519 key point.
+- WebOfTrust: SQLite-backed web of trust with operator roots
+  (wot_roots) and verified introduction edges (wot_intros).
+  record() checks the INTRODUCER's trust BEFORE verifying the
+  signature (no unauthenticated crypto work on unknown introducers),
+  rejects signed_at == 0, and returns typed outcomes: Applied{depth},
+  Duplicate, Conflict, UnknownIntroducer, InvalidSignature,
+  DepthExceeded. The first verified key per EID wins — conflicting
+  introductions never overwrite existing trust. Trust depths are
+  recomputed by BFS/fixed-point from the roots on every query, so
+  remove_introduction()/untrust() automatically cascade-distrust
+  every key that was only reachable through them.
+- verify_signed_bundle_over_wot(): verifies a signed bundle against
+  the wot-trusted key for its source EID (bridging to
+  dtn_bpsec::verify_bundle), so introduced keys work end to end.
+- cli: dtn-link keyring wot add-root|list|introduce|record|untrust
+  (wot.db in the DTN home directory) — sign/emit DTNWI1 hex
+  announcements, apply received ones, list the trusted set by depth,
+  withdraw root trust.
+- 14 new tests over the real module: DTNWI1 codec roundtrip incl.
+  exact wire layout and u64::MAX stamps, every rejection path
+  (truncated header/body, bad magic, empty/invalid-UTF-8 EIDs,
+  invalid key point, trailing bytes, zero signed_at), trust chains
+  up to and beyond the depth limit, cascade distrust after edge and
+  root removal, duplicate and conflicting introductions (first
+  verified key wins), signature rejection under a trusted-but-wrong
+  introducer, persistence across reopen, and the
+  signed-bundle-over-wot bridge (valid, tampered, unknown source,
+  unsigned).
+- Honest scope: this is reachability trust ("a key I trust at depth
+  d vouches for that key"), not identity proof; no expiry, decay or
+  operator-confirmed pinning yet.
+
+
 ## 0.23.0 (2026-11-21)
 
 Phase 24 — remote read receipts over the DTN message channel (the

@@ -14,7 +14,7 @@
 10. Federation layer — inter-region routing via gateway peers [implemented — dtn-federation (Phase 14)]
 11. Platform shell boundary — C ABI over the application layer [implemented — dtn-ffi (Phase 19); desktop shell dtn-shell (Phase 20); Android JNI shell (Phase 21); iOS Swift shell (Phase 22)]
 
-## Current implementation (Phases 1-24)
+## Current implementation (Phases 1-25)
 
 ```
 +--------------------------------------------------------+
@@ -66,7 +66,7 @@
   holding the nonce; `decrypt_bundle` restores the plaintext with the
   shared 32-byte key and returns typed errors on wrong key or tampering.
   Wrong key, tampered ciphertext or tampered nonce all fail closed.
-- **Honest scope**: web-of-trust and security-parameter negotiation
+- **Honest scope**: security-parameter negotiation
   are future work; RFC 9173 context identifiers and the primary-block
   AAD scope landed in Phase 16 (see below).
 - A DTN endpoint identifier is NOT proof of identity; only signature
@@ -75,7 +75,7 @@
   (EID → trusted Ed25519 public key, SQLite). The operator adds keys
   with `dtn-link keyring add` (trust-on-first-use);
   `dtn_keyring::verify_signed_bundle` checks a bundle's BIB against
-  the trusted key for its source EID. Honest scope: web-of-trust is
+  the trusted key for its source EID. Honest scope:  is
   future work; automatic in-contact key learning and signed rotation
   landed in Phases 8 and 17.
 
@@ -132,6 +132,31 @@ this:
 Honest scope: a rotation announcement is only understood by peers on
 >= 0.16 (announcing to an older peer degrades that one contact);
 web-of-trust and operator-confirmed pinning remain future work.
+
+### Web-of-trust key introductions (Phase 25)
+
+The keyring is TOFU: it enforces whatever key was first met in a
+contact. The web-of-trust layer (`dtn-keyring::wot`) extends trust to
+keys never met directly: a trusted introducer (an operator root, or
+any EID already reachable from one) signs a DTNWI1 announcement
+vouching for another EID's Ed25519 key.
+
+    wire = [DTNWI1][u16 introducer len][introducer_eid]
+           [u16 target len][introduced_eid]
+           [32-byte introduced key][u64 signed_at]
+           [64-byte Ed25519 signature by the introducer]
+
+`WebOfTrust` stores roots and verified introduction edges in SQLite
+and recomputes trust by BFS from the roots on every query (bounded by
+`max_depth`, default 3). Introducer trust is checked before any
+signature work; the store is only mutated on success; the first
+verified key for an EID wins, so conflicting introductions never
+overwrite existing trust; removing a root or an edge cascade-
+distrusts everything that was only reachable through it.
+
+CLI: `dtn-link keyring wot add-root|list|introduce|record|untrust`.
+Honest scope: this is reachability trust, not identity proof — no
+expiry or decay yet.
 
 ### Multi-hop flow
 
@@ -475,5 +500,5 @@ work on the same ABI.
 - Done: Phase 22 iOS shell — shells/ios (Swift/SwiftPM) embeds the real libdtn_ffi on iOS through the CDtnFfi C target and the DtnFfi Swift bridge over the exact dtn_app_* C ABI, with typed JSON models, a @MainActor ChatController, a SwiftUI chat example and an XCTest model suite that runs without the native library (docs/ios.md).
 - Done: Phase 23 attachments — dtn-app::attachments DTNA1 payload format (strict decode, safe-filename validation, 8 MiB cap), App::send_file / attachment_for / extract_attachment, attachment bytes persisted in the app database, chat CLI send-file/extract (docs/apps.md).
 - Done: Phase 24 remote read receipts — dtn-app::receipts DTNR1 payload format (strict decode, bundle-key correlation, spoof-proof confirmation), App::send_read_receipts / poll_inbox_with_receipts / message_confirmed, ✓read rendering, in-place database migration (docs/apps.md).
-- Next: TLS (RFC 9174 §4.4), web-of-trust, TLE-driven pass prediction, a network-wide management plane, background sync services and push notifications on the mobile shells, an FFI/receipts surface for the platform shells.
+- Next: TLS (RFC 9174 §4.4), TLE-driven pass prediction, a network-wide management plane, background sync services and push notifications on the mobile shells, an FFI/receipts surface for the platform shells.
 

@@ -499,15 +499,131 @@ fn main() {
                         std::process::exit(1);
                     }
                 }
+                Some("wot") => {
+                    // Phase 25 web-of-trust introductions.
+                    let wot_path = { let mut h = dtn_home(); h.push("wot.db"); h };
+                    let sub = args.get(2).map(String::as_str);
+                    match sub {
+                        Some("add-root") => {
+                            let (eid, key_hex) = match (args.get(3), args.get(4)) {
+                                (Some(e), Some(k)) => (e.clone(), k.clone()),
+                                _ => {
+                                    eprintln!("usage: dtn-link keyring wot add-root <eid-uri> <pubkey-64-hex-chars>");
+                                    std::process::exit(2);
+                                }
+                            };
+                            let key_bytes = hex_to_32(&key_hex).unwrap_or_else(|| {
+                                eprintln!("error: pubkey must be 64 hex characters (32 bytes)");
+                                std::process::exit(2);
+                            });
+                            let key = ed25519_dalek::VerifyingKey::from_bytes(&key_bytes).expect("invalid key");
+                            let mut w = dtn_keyring::wot::WebOfTrust::open(&wot_path).expect("open web-of-trust store");
+                            let inserted = w.add_root(&eid, &key).expect("add root");
+                            println!("{}", if inserted { format!("Root trust added for {eid}") } else { format!("Root trust for {eid} re-pointed") });
+                        }
+                        Some("list") => {
+                            let max_depth: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(3);
+                            let w = dtn_keyring::wot::WebOfTrust::open(&wot_path).expect("open web-of-trust store");
+                            let set = w.trusted_set(max_depth).expect("trusted set");
+                            if set.is_empty() {
+                                println!("No trusted identities. Add a root: dtn-link keyring wot add-root <eid> <pubkey>");
+                            }
+                            for e in set {
+                                println!("depth {}  {}  {}", e.depth, e.eid, e.pubkey_hex);
+                            }
+                        }
+                        Some("introduce") => {
+                            let (target, key_hex) = match (args.get(3), args.get(4)) {
+                                (Some(e), Some(k)) => (e.clone(), k.clone()),
+                                _ => {
+                                    eprintln!("usage: dtn-link keyring wot introduce <target-eid-uri> <target-pubkey-64-hex>");
+                                    std::process::exit(2);
+                                }
+                            };
+                            let key_bytes = hex_to_32(&key_hex).unwrap_or_else(|| {
+                                eprintln!("error: pubkey must be 64 hex characters (32 bytes)");
+                                std::process::exit(2);
+                            });
+                            let key = ed25519_dalek::VerifyingKey::from_bytes(&key_bytes).expect("invalid key");
+                            let node = Node::open_persistent(1, &db_path(), Strategy::Epidemic).expect("failed to open node");
+                            let intro = dtn_keyring::wot::Introduction::sign(
+                                &node.identity.signing_key(),
+                                &node.identity.eid.as_uri(),
+                                &target,
+                                &key,
+                                unix_now(),
+                            );
+                            println!("{}", to_hex(&intro.encode()));
+                            println!("Hand the hex to the vouched peer (or any intermediary); it is applied there with:");
+                            println!("  dtn-link keyring wot record <hex>");
+                        }
+                        Some("record") => {
+                            let Some(intro_hex) = args.get(3) else {
+                                eprintln!("usage: dtn-link keyring wot record <DTNWI1-announcement-hex>");
+                                std::process::exit(2);
+                            };
+                            let wire = hex_decode(intro_hex).unwrap_or_else(|| {
+                                eprintln!("error: announcement must be hex-encoded bytes");
+                                std::process::exit(2);
+                            });
+                            let intro = dtn_keyring::wot::Introduction::decode(&wire).unwrap_or_else(|e| {
+                                eprintln!("invalid announcement: {e:?}");
+                                std::process::exit(1);
+                            });
+                            let max_depth = dtn_keyring::wot::DEFAULT_MAX_DEPTH;
+                            let mut w = dtn_keyring::wot::WebOfTrust::open(&wot_path).expect("open web-of-trust store");
+                            match w.record(&intro, max_depth).expect("record failed") {
+                                dtn_keyring::wot::RecordOutcome::Applied { depth } => {
+                                    println!("Trust applied: {} at depth {depth} (vouched by {})", intro.introduced_eid, intro.introducer_eid);
+                                }
+                                dtn_keyring::wot::RecordOutcome::Duplicate => println!("Already known and trusted — unchanged."),
+                                dtn_keyring::wot::RecordOutcome::Conflict => {
+                                    println!("CONFLICT: a different key for {} is already trusted; nothing changed.", intro.introduced_eid);
+                                    std::process::exit(1);
+                                }
+                                dtn_keyring::wot::RecordOutcome::UnknownIntroducer => {
+                                    println!("UNKNOWN INTRODUCER: {} is not trusted within depth {max_depth}.", intro.introducer_eid);
+                                    std::process::exit(1);
+                                }
+                                dtn_keyring::wot::RecordOutcome::InvalidSignature => {
+                                    println!("INVALID signature — the announcement is rejected.");
+                                    std::process::exit(1);
+                                }
+                                dtn_keyring::wot::RecordOutcome::DepthExceeded => {
+                                    println!("REJECTED: the introduction would exceed trust depth {max_depth}.");
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
+                        Some("untrust") => {
+                            let Some(eid) = args.get(3) else {
+                                eprintln!("usage: dtn-link keyring wot untrust <eid-uri>");
+                                std::process::exit(2);
+                            };
+                            let mut w = dtn_keyring::wot::WebOfTrust::open(&wot_path).expect("open web-of-trust store");
+                            let n = w.untrust(eid).expect("untrust failed");
+                            if n == 0 {
+                                eprintln!("No root trust for {eid}");
+                                std::process::exit(1);
+                            }
+                            println!("Untrusted {eid}; everything reachable only through it is no longer trusted.");
+                        }
+                        _ => {
+                            eprintln!("usage:\n  dtn-link keyring wot add-root <eid-uri> <pubkey-64-hex>\n  dtn-link keyring wot list [max-depth]\n  dtn-link keyring wot introduce <target-eid> <target-pubkey-64-hex>\n  dtn-link keyring wot record <DTNWI1-announcement-hex>\n  dtn-link keyring wot untrust <eid-uri>");
+                            std::process::exit(2);
+                        }
+                    }
+                }
                 _ => {
-                    eprintln!("usage: dtn-link keyring add|list|remove ...");
+                    eprintln!("usage: dtn-link keyring add|list|remove|wot ...");
                     std::process::exit(2);
                 }
             }
         }
         Some("federation") => {
             // usage:
-            //   dtn-link federation show  <plan-file> [regions-file]
+            //   dtn-link keyring wot add-root|list|introduce|record|untrust
+  dtn-link federation show  <plan-file> [regions-file]
             //   dtn-link federation route <plan-file> <regions-file> <eid>
             //   dtn-link federation sweep <plan-file> <regions-file> [--insecure]
             let sub = args.get(1).map(String::as_str);
@@ -669,7 +785,7 @@ fn main() {
                 }
             }
         }
-        Some("version") => println!("dtn-link 0.22.0 (BPv7, TCPCLv4, BPSec, gateways, federation, diagnostics, app layer, attachments, FFI)"),
+        Some("version") => println!("dtn-link 0.24.0 (BPv7, TCPCLv4, BPSec, web-of-trust, gateways, federation, diagnostics, app layer, attachments, FFI)"),
         _ => {
             eprintln!(
                 "dtn-link — decentralized DTN communication
@@ -713,6 +829,20 @@ fn hex_to_32(s: &str) -> Option<[u8; 32]> {
         let hi = (chunk[0] as char).to_digit(16).unwrap() as u8;
         let lo = (chunk[1] as char).to_digit(16).unwrap() as u8;
         out[i] = (hi << 4) | lo;
+    }
+    Some(out)
+}
+
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    let s = s.trim();
+    if s.is_empty() || s.len() % 2 != 0 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
+    for chunk in s.as_bytes().chunks(2) {
+        let hi = (chunk[0] as char).to_digit(16).unwrap() as u8;
+        let lo = (chunk[1] as char).to_digit(16).unwrap() as u8;
+        out.push((hi << 4) | lo);
     }
     Some(out)
 }

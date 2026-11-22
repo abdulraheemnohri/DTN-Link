@@ -9,7 +9,7 @@ without requiring a SIM card, cellular subscription or Wi-Fi router for every
 communication. It uses Bundle Protocol v7 (RFC 9171), store-carry-forward
 routing, modular physical transport adapters and optional internet gateways.
 
-## Status: Phases 1-24 (core, transports, security, adapters, gateways, diagnostics, federation, apps + attachments + read receipts, ffi, desktop + android + ios shells)
+## Status: Phases 1-25 (core, transports, security, adapters, gateways, diagnostics, federation, apps + attachments + read receipts, ffi, desktop + android + ios shells)
 
 | Component | Status |
 |---|---|
@@ -37,6 +37,7 @@ routing, modular physical transport adapters and optional internet gateways.
 | CLI | implemented — init/status/send/receive/bundles/chat (+ send-file/extract)/forward/daemon/doctor/verify/keyring/encrypt/decrypt/decode/federation |
 | RFC 9173 default contexts: BIB-HMAC-SHA2 (ctx 1), BCB-AES-GCM with primary-block AAD (ctx 2) | implemented + tested (crates/dtn-bpsec::rfc9173) |
 | Signed key rotation (TOFU + signed KeyChange announcements) | implemented + tested (crates/dtn-keyring, dtn-daemon) |
+| Web-of-trust key introductions | `dtn-keyring::wot` | DTNWI1 signed introduction announcements; BFS depth-limited trust from operator roots; cascade revocation; first verified key wins. | 25 |
 | Desktop shell on the FFI (dtn-shell + FFI self test) | implemented + tested (shells/desktop; `make -C shells/desktop test`) |
 | Android shell on the FFI (JNI shim + Kotlin chat app + JVM tests) | implemented + tested (shells/android; `./gradlew :app:testDebugUnitTest`, device UI) |
 | iOS / Swift bridge shell on the dtn-ffi C ABI (SwiftPM bridge + SwiftUI chat app + model tests) | implemented + tested (shells/ios; `swift test`, device app) |
