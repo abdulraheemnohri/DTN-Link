@@ -622,8 +622,7 @@ fn main() {
         }
         Some("federation") => {
             // usage:
-            //   dtn-link keyring wot add-root|list|introduce|record|untrust
-  dtn-link federation show  <plan-file> [regions-file]
+            //   dtn-link federation show  <plan-file> [regions-file]
             //   dtn-link federation route <plan-file> <regions-file> <eid>
             //   dtn-link federation sweep <plan-file> <regions-file> [--insecure]
             let sub = args.get(1).map(String::as_str);
@@ -806,6 +805,7 @@ usage:
   dtn-link forward <dtn://peer> [strategy]
   dtn-link daemon --listen 0.0.0.0:4556 [--peers host:port,...] [--strategy epidemic|spray|opportunistic] [--interval 30] [--no-enforce-tofu] [--insecure]
   dtn-link verify <pubkey-hex>   (bundle bytes on stdin)
+  dtn-link keyring wot add-root|list|introduce|record|untrust
   dtn-link decode         (bundle bytes on stdin, prints structure)
   dtn-link federation show <plan-file> [regions-file]
   dtn-link federation route <plan-file> <regions-file> <eid>
