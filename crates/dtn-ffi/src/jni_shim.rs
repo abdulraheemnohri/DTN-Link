@@ -295,6 +295,108 @@ pub extern "system" fn Java_link_dtn_shell_Native_resolveContact(
 }
 
 // ---------------------------------------------------------------------------
+// Receipts + attachments (Phase 26, over the same C ABI entry points)
+// ---------------------------------------------------------------------------
+
+#[no_mangle]
+pub extern "system" fn Java_link_dtn_shell_Native_sendFile(
+    mut env: JNIEnv,
+    _thiz: JClass,
+    handle: jlong,
+    peer: JString,
+    path: JString,
+    lifetime: jlong,
+) -> jlong {
+    let (Some(peer), Some(path)) = (
+        cstr_arg(&mut env, &peer, "peer"),
+        cstr_arg(&mut env, &path, "path"),
+    ) else {
+        return -1;
+    };
+    unsafe {
+        crate::dtn_app_send_file(
+            handle_from_java(handle),
+            peer.as_ptr(),
+            path.as_ptr(),
+            u64_arg(lifetime),
+        )
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_link_dtn_shell_Native_extractAttachment(
+    mut env: JNIEnv,
+    _thiz: JClass,
+    handle: jlong,
+    message_id: jlong,
+    dest_dir: JString,
+) -> jstring {
+    let Some(dest_dir) = cstr_arg(&mut env, &dest_dir, "dest_dir") else {
+        return std::ptr::null_mut();
+    };
+    match unsafe {
+        crate::dtn_app_extract_attachment(handle_from_java(handle), message_id, dest_dir.as_ptr())
+    } {
+        p if p.is_null() => std::ptr::null_mut(),
+        p => {
+            let owned = unsafe { take_owned(p) };
+            match owned {
+                Some(s) => to_jstring(&mut env, &s),
+                None => std::ptr::null_mut(),
+            }
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_link_dtn_shell_Native_sendReadReceipts(
+    mut env: JNIEnv,
+    _thiz: JClass,
+    handle: jlong,
+    peer: JString,
+    lifetime: jlong,
+) -> jlong {
+    let Some(peer) = cstr_arg(&mut env, &peer, "peer") else {
+        return -1;
+    };
+    unsafe {
+        crate::dtn_app_send_read_receipts(
+            handle_from_java(handle),
+            peer.as_ptr(),
+            u64_arg(lifetime),
+        )
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_link_dtn_shell_Native_messageConfirmed(
+    _env: JNIEnv,
+    _thiz: JClass,
+    handle: jlong,
+    message_id: jlong,
+) -> jlong {
+    unsafe { crate::dtn_app_message_confirmed(handle_from_java(handle), message_id) }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_link_dtn_shell_Native_pollInboxWithReceipts(
+    mut env: JNIEnv,
+    _thiz: JClass,
+    handle: jlong,
+) -> jstring {
+    match unsafe { crate::dtn_app_poll_inbox_with_receipts(handle_from_java(handle)) } {
+        p if p.is_null() => std::ptr::null_mut(),
+        p => {
+            let owned = unsafe { take_owned(p) };
+            match owned {
+                Some(s) => to_jstring(&mut env, &s),
+                None => std::ptr::null_mut(),
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Error protocol
 // ---------------------------------------------------------------------------
 

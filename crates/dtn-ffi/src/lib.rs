@@ -12,6 +12,11 @@
 //!   * `dtn_app_conversations` / `dtn_app_history` — chat state as JSON
 //!   * `dtn_app_unread_total` / `dtn_app_mark_read` — unread badge data
 //!   * `dtn_app_add_contact` / `dtn_app_resolve_contact` — alias book
+//!   * `dtn_app_send_file` / `dtn_app_extract_attachment` — file
+//!     attachments (Phase 23) over the C ABI (Phase 26, dtn_app_send_file)
+//!   * `dtn_app_send_read_receipts` / `dtn_app_poll_inbox_with_receipts` /
+//!     `dtn_app_message_confirmed` — remote read receipts (Phase 24,
+//!     Phase 26 FFI surface)
 //!   * `dtn_app_last_error` / `dtn_string_free` — error + string protocol
 //!
 //! Calling convention:
@@ -522,6 +527,177 @@ pub unsafe extern "C" fn dtn_app_resolve_contact(
 }
 
 // ---------------------------------------------------------------------------
+// Read receipts + attachments (Phase 26)
+// ---------------------------------------------------------------------------
+
+/// Send read receipts for every inbound message of `peer_uri` that has
+/// not been acknowledged yet (Phase 24 semantics over the wire). The
+/// acknowledgment crosses the DTN as a normal store-carry-forward
+/// bundle. Returns the number of acknowledged messages (0 when nothing
+/// is pending, in which case no bundle is created), or -1 on error.
+///
+/// # Safety
+/// `handle` and `peer_uri` must be a live handle / NUL-terminated UTF-8
+/// C string, or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn dtn_app_send_read_receipts(
+    handle: *mut AppHandle,
+    peer_uri: *const c_char,
+    lifetime: u64,
+) -> c_longlong {
+    let peer = match cstr_opt(peer_uri, "peer_uri") {
+        Some(p) => p,
+        None => return -1,
+    };
+    let eid = match parse_eid(peer) {
+        Some(e) => e,
+        None => {
+            set_last_error(format!("invalid peer EID URI: {peer}"));
+            return -1;
+        }
+    };
+    with_app(handle, |mut app| app.send_read_receipts(&eid, lifetime))
+        .map(|n| n as c_longlong)
+        .unwrap_or(-1)
+}
+
+/// Whether one outbound message has been confirmed READ by its peer via
+/// a received read receipt (Phase 24). Returns 1 (confirmed), 0 (not
+/// confirmed or unknown row) or -1 on error.
+///
+/// # Safety
+/// `handle` must be a live handle or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn dtn_app_message_confirmed(
+    handle: *mut AppHandle,
+    message_id: c_longlong,
+) -> c_longlong {
+    with_app(handle, |app| app.message_confirmed(message_id))
+        .map(|c| c as c_longlong)
+        .unwrap_or(-1)
+}
+
+/// Drain the node inbox, applying arriving read receipts AND returning
+/// both halves as one JSON object:
+///
+///   {"messages": [ ...same shape as dtn_app_poll_inbox... ],
+///    "receipts": [{"from":"dtn://..","acked_at":<unix-seconds>,
+///                  "confirmed":<out-rows-confirmed>}, ..]}
+///
+/// Receipts are applied to the conversations and never appear as chat
+/// rows; spoofed or foreign keys confirm nothing. NULL on error.
+///
+/// # Safety
+/// `handle` must be a live handle or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn dtn_app_poll_inbox_with_receipts(
+    handle: *mut AppHandle,
+) -> *mut c_char {
+    let (msgs, receipts) = match with_app(handle, |mut app| app.poll_inbox_with_receipts()) {
+        Some(v) => v,
+        None => return std::ptr::null_mut(),
+    };
+    let items: Vec<String> = msgs
+        .iter()
+        .map(|m| {
+            format!(
+                r#"{{"id":{},"peer":{},"direction":{},"body":{},"created_at":{},"bundle_key":{}}}"#,
+                m.id,
+                json_str(&m.peer),
+                json_str(m.direction.as_str()),
+                json_str(&m.body),
+                m.created_at,
+                json_opt(&m.bundle_key),
+            )
+        })
+        .collect();
+    let acks: Vec<String> = receipts
+        .iter()
+        .map(|r| {
+            format!(
+                r#"{{"from":{},"acked_at":{},"confirmed":{}}}"#,
+                json_str(&r.from),
+                r.acked_at,
+                r.confirmed,
+            )
+        })
+        .collect();
+    let json = format!(r#"{{"messages":[{}],"receipts":[{}]}}"#, items.join(","), acks.join(","));
+    match CString::new(json) {
+        Ok(cs) => cs.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Compose a real file attachment to `peer_uri` (Phase 23 semantics):
+/// the file is read from `path`, its filename validated and the bytes
+/// queued as one DTNA1 bundle in the store. Returns the message row
+/// id, or -1 on error (unreadable file, unsafe filename, too large).
+///
+/// # Safety
+/// `handle`, `peer_uri` and `path` must be live handles / NUL-
+/// terminated UTF-8 C strings, or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn dtn_app_send_file(
+    handle: *mut AppHandle,
+    peer_uri: *const c_char,
+    path: *const c_char,
+    lifetime: u64,
+) -> c_longlong {
+    let peer = match cstr_opt(peer_uri, "peer_uri") {
+        Some(p) => p,
+        None => return -1,
+    };
+    let p = match cstr_opt(path, "path") {
+        Some(p) => p,
+        None => return -1,
+    };
+    let eid = match parse_eid(peer) {
+        Some(e) => e,
+        None => {
+            set_last_error(format!("invalid peer EID URI: {peer}"));
+            return -1;
+        }
+    };
+    with_app(handle, |mut app| {
+        app.send_file(&eid, std::path::Path::new(p), lifetime).map(|m| m.id)
+    })
+    .map(|id| id as c_longlong)
+    .unwrap_or(-1)
+}
+
+/// Write the attachment bytes stored for `message_id` into `dest_dir`
+/// byte-for-byte; the stored filename is re-validated, so nothing can
+/// escape the destination directory. Returns a newly allocated path
+/// (free with `dtn_string_free`), or NULL on error (unknown message,
+/// no attachment, unsafe stored name).
+///
+/// # Safety
+/// `handle` and `dest_dir` must be a live handle / NUL-terminated
+/// UTF-8 C string, or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn dtn_app_extract_attachment(
+    handle: *mut AppHandle,
+    message_id: c_longlong,
+    dest_dir: *const c_char,
+) -> *mut c_char {
+    let dir = match cstr_opt(dest_dir, "dest_dir") {
+        Some(d) => d,
+        None => return std::ptr::null_mut(),
+    };
+    let out = match with_app(handle, |app| {
+        app.extract_attachment(message_id, std::path::Path::new(dir))
+    }) {
+        Some(p) => p,
+        None => return std::ptr::null_mut(),
+    };
+    match CString::new(out.to_string_lossy().into_owned()) {
+        Ok(cs) => cs.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests — the C ABI exercised end-to-end over the real node engine
 // ---------------------------------------------------------------------------
 
@@ -729,5 +905,156 @@ mod tests {
             dtn_app_close(h);
         }
         cleanup(&db);
+    }
+
+    // -- Phase 26: FFI read-receipt + attachment surface ----------------------
+
+    #[test]
+    fn ffi_receipts_end_to_end_over_the_c_abi() {
+        let (dba, dbb) = (tmp_db("rr-ffi-a"), tmp_db("rr-ffi-b"));
+        unsafe {
+            let a = dtn_app_open(11, CString::new(dba.as_str()).unwrap().as_ptr(), 0);
+            let b = dtn_app_open(12, CString::new(dbb.as_str()).unwrap().as_ptr(), 0);
+            assert!(!a.is_null() && !b.is_null());
+            let eid_a = take_string(dtn_app_eid(a));
+            let eid_b = take_string(dtn_app_eid(b));
+
+            // A sends two messages; B delivers and reads them.
+            let body1 = CString::new("one").unwrap();
+            let body2 = CString::new("two").unwrap();
+            let peer = CString::new(eid_b.as_str()).unwrap();
+            assert!(dtn_app_send(a, peer.as_ptr(), body1.as_ptr(), 3600) >= 0);
+            assert!(dtn_app_send(a, peer.as_ptr(), body2.as_ptr(), 3600) >= 0);
+            let wire_both: Vec<Vec<u8>> = {
+                let handle = &*a;
+                let app = handle.app.lock().unwrap();
+                app.node.store.all().unwrap().iter().map(|r| r.data.clone()).collect()
+            };
+            for wire in &wire_both {
+                let handle = &*b;
+                let app = handle.app.lock().unwrap();
+                assert!(app.node.receive(wire).unwrap().is_some());
+            }
+            let poll = take_string(dtn_app_poll_inbox(b));
+            assert_eq!(poll.matches(r#""direction":"in""#).count(), 2, "poll: {poll}");
+
+            // B acknowledges through the C ABI; the second ack sends nothing.
+            assert_eq!(dtn_app_mark_read(b, peer.as_ptr()), 2);
+            assert_eq!(dtn_app_send_read_receipts(b, peer.as_ptr(), 3600), 2, "two acks, receipt: {}", last_error());
+            assert_eq!(dtn_app_send_read_receipts(b, peer.as_ptr(), 3600), 0, "idempotent, no second bundle");
+
+            // Carrying the receipt back to A's inbox.
+            let wire_receipt = {
+                let handle = &*b;
+                let app = handle.app.lock().unwrap();
+                app.node
+                    .store
+                    .all()
+                    .unwrap()
+                    .iter()
+                    .map(|r| r.data.clone())
+                    .find(|d| {
+                        dtn_bpv7::Bundle::decode(d)
+                            .map(|x| x.payload().map(|p| p.starts_with(b"DTNR1")).unwrap_or(false))
+                            .unwrap_or(false)
+                    })
+                    .expect("the DTNR1 receipt bundle is in the store")
+            };
+            {
+                let handle = &*a;
+                let app = handle.app.lock().unwrap();
+                assert!(app.node.receive(&wire_receipt).unwrap().is_some());
+            }
+
+            // The combined poll reports the receipt, never a chat row.
+            let combined = take_string(dtn_app_poll_inbox_with_receipts(a));
+            assert!(combined.contains(r#""messages":[]"#), "no receipt chat rows: {combined}");
+            let from_needle = format!(r#""from":"{eid_b}""#);
+            assert!(combined.contains(&from_needle), "combined: {combined}");
+            assert!(combined.contains(r#""confirmed":2"#));
+
+            // Per-message confirmed-read state is readable through the ABI.
+            let peer_a = CString::new(eid_a.as_str()).unwrap();
+            let hist = take_string(dtn_app_history(a, peer_a.as_ptr()));
+            assert!(hist.contains("one") && hist.contains("two"));
+            assert_eq!(dtn_app_message_confirmed(a, 1), 1);
+            assert_eq!(dtn_app_message_confirmed(a, 2), 1);
+            assert_eq!(dtn_app_message_confirmed(a, 9999), 0, "unknown row is not confirmed");
+
+            dtn_app_close(a);
+            dtn_app_close(b);
+        }
+        cleanup(&dba);
+        cleanup(&dbb);
+    }
+
+    #[test]
+    fn ffi_attachment_send_and_extract_over_the_c_abi() {
+        let (dba, dbb) = (tmp_db("att-ffi-a"), tmp_db("att-ffi-b"));
+        let src = std::env::temp_dir().join(format!("dtn-ffi-att-src-{}-261.bin", std::process::id()));
+        std::fs::write(&src, b"payload bytes").unwrap();
+        unsafe {
+            let a = dtn_app_open(13, CString::new(dba.as_str()).unwrap().as_ptr(), 0);
+            let b = dtn_app_open(14, CString::new(dbb.as_str()).unwrap().as_ptr(), 0);
+            assert!(!a.is_null() && !b.is_null());
+            let eid_b = take_string(dtn_app_eid(b));
+
+            let peer = CString::new(eid_b.as_str()).unwrap();
+            let path = CString::new(src.to_string_lossy().into_owned()).unwrap();
+            let msg_id = dtn_app_send_file(a, peer.as_ptr(), path.as_ptr(), 3600);
+            assert!(msg_id >= 0, "send_file failed: {}", last_error());
+
+            let wire = {
+                let handle = &*a;
+                let app = handle.app.lock().unwrap();
+                app.node.store.all().unwrap().remove(0).data
+            };
+            {
+                let handle = &*b;
+                let app = handle.app.lock().unwrap();
+                assert!(app.node.receive(&wire).unwrap().is_some());
+            }
+            let poll = take_string(dtn_app_poll_inbox(b));
+            assert!(poll.contains("[attachment: "), "poll: {poll}");
+
+            let dest = std::env::temp_dir().join(format!("dtn-ffi-att-out-{}-261", std::process::id()));
+            std::fs::create_dir_all(&dest).unwrap();
+            let dest_c = CString::new(dest.to_string_lossy().into_owned()).unwrap();
+            let extracted = dtn_app_extract_attachment(b, 1, dest_c.as_ptr());
+            assert!(!extracted.is_null(), "extract failed: {}", last_error());
+            let out_path = take_string(extracted);
+            assert_eq!(std::fs::read(&out_path).unwrap(), b"payload bytes");
+
+            // Unknown message id -> error, never a crash.
+            assert!(dtn_app_extract_attachment(b, 77, dest_c.as_ptr()).is_null());
+            assert!(last_error().contains("no attachment"));
+
+            dtn_app_close(a);
+            dtn_app_close(b);
+            std::fs::remove_dir_all(&dest).unwrap();
+        }
+        let _ = std::fs::remove_file(&src);
+        cleanup(&dba);
+        cleanup(&dbb);
+    }
+
+    #[test]
+    fn ffi_receipt_and_attachment_null_protocol() {
+        unsafe {
+            assert_eq!(dtn_app_send_read_receipts(std::ptr::null_mut(), std::ptr::null(), 60), -1);
+            assert_eq!(dtn_app_message_confirmed(std::ptr::null_mut(), 1), -1);
+            assert_eq!(dtn_app_send_file(std::ptr::null_mut(), std::ptr::null(), std::ptr::null(), 60), -1);
+            assert!(dtn_app_poll_inbox_with_receipts(std::ptr::null_mut()).is_null());
+            assert!(dtn_app_extract_attachment(std::ptr::null_mut(), 1, std::ptr::null()).is_null());
+            assert!(last_error().contains("null app handle"));
+
+            // NULL strings on a live handle are errors, not crashes.
+            let h = dtn_app_open(15, CString::new(tmp_db("null-ffi").as_str()).unwrap().as_ptr(), 0);
+            assert!(!h.is_null());
+            assert_eq!(dtn_app_send_read_receipts(h, std::ptr::null(), 60), -1);
+            assert_eq!(dtn_app_send_file(h, std::ptr::null(), std::ptr::null(), 60), -1);
+            assert!(dtn_app_extract_attachment(h, 1, std::ptr::null()).is_null());
+            dtn_app_close(h);
+        }
     }
 }

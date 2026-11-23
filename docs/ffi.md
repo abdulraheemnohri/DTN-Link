@@ -45,6 +45,29 @@ Conversations (most recently active first):
     [{"peer":"dtn://node-2","last_body":"hi","last_at":1731700000,
       "unread":1,"total":1}, ...]
 
+Inbox drain combined with read receipts (Phase 26,
+dtn_app_poll_inbox_with_receipts):
+
+    {"messages":[ ...same message shape as above... ],
+     "receipts":[{"from":"dtn://node-2","acked_at":1731700000,
+                  "confirmed":2}, ...]}
+
+Receipts are never chat rows; "confirmed" counts the local outbound
+messages the receipt acknowledged (spoofed or foreign keys confirm
+nothing). Per-message confirmed-read state is also queryable directly:
+dtn_app_message_confirmed(handle, id) returns 1 / 0 (-1 on error).
+dtn_app_send_read_receipts(handle, peer, lifetime) acknowledges every
+inbound message of the peer not yet receipted (0 = nothing pending,
+no bundle created).
+
+Attachments (Phase 26, Phase 23 engine semantics):
+dtn_app_send_file(handle, peer, path, lifetime) queues a real file as
+one DTNA1 bundle (message row id returned, or -1 on unreadable file,
+unsafe filename or over-cap size); dtn_app_extract_attachment(handle,
+id, dest_dir) writes the stored bytes byte-for-byte into dest_dir and
+returns the written path (free with dtn_string_free) or NULL. The
+stored filename is re-validated, so nothing escapes dest_dir.
+
 ## Minimal C usage
 
     dtn_app_handle *app = dtn_app_open(1, "/data/node.db",
@@ -69,11 +92,15 @@ Conversations (most recently active first):
 
 ## Honest scope
 
-The FFI covers the chat/app engine surface, and the desktop terminal
-shell (`shells/desktop`, docs/shell.md) is its working reference
-consumer. GUI toolkits, Android (JNI) and iOS (swift bridge) shells,
-desktop packaging, attachments and remote read receipts are future
-work; the FFI is the stable boundary they build
-on. `dtn_app_resolve_contact` returns NULL both for unknown aliases
-and errors; distinguish via `dtn_app_last_error`.
+The FFI covers the chat/app engine surface including the Phase 26
+read-receipt and attachment surface (`dtn_app_send_read_receipts`,
+`dtn_app_poll_inbox_with_receipts`, `dtn_app_message_confirmed`,
+`dtn_app_send_file`, `dtn_app_extract_attachment`), mirrored by the
+Android JNI shim. The desktop terminal shell (`shells/desktop`,
+docs/shell.md) is the working reference consumer; its `json.c` reader
+keeps parsing the unchanged flat message shapes (the new entry points
+are opt-in). GUI toolkits, desktop packaging and FFI-side transport
+progress reporting remain future work; the FFI is the stable boundary
+they build on. `dtn_app_resolve_contact` returns NULL both for
+unknown aliases and errors; distinguish via `dtn_app_last_error`.
 

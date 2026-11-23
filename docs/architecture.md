@@ -2,7 +2,7 @@
 
 ## Layered model (target)
 
-1. Application layer — messaging, files, alerts [messaging + attachments + remote read receipts implemented — dtn-app (Phases 18/23/24); alerts future]
+1. Application layer — messaging, files, alerts, read receipts [messaging + attachments + remote read receipts implemented — dtn-app (Phases 18/23/24); the FFI receipt/attachment surface implemented — dtn-ffi (Phase 26); alerts future]
 2. Identity layer — Ed25519 node identities [implemented]
 3. Bundle layer — BPv7 (RFC 9171) creation/validation [implemented]
 4. Security layer — BPSec (RFC 9172) [BIB + BCB implemented, RFC 9173 contexts BIB-HMAC-SHA2 / BCB-AES-GCM]
@@ -349,8 +349,7 @@ Strict decode (exact lengths, no trailing bytes, entry count ≤ 256,
 keys bounded + UTF-8, no control characters); malformed receipts
 degrade to lossy chat text. The confirmed-read column migrates older
 app databases in place. See docs/apps.md. Honest scope: receipts
-confirm READ state only (not per-hop delivery), and the `dtn-ffi`
-JSON surface does not expose receipt state yet.
+confirm READ state only (not per-hop delivery); the receipt surface crossed the C ABI in Phase 26 (`dtn_app_send_read_receipts`, `dtn_app_poll_inbox_with_receipts`, `dtn_app_message_confirmed`).
 
 ### FFI boundary (Phase 19)
 
@@ -477,9 +476,34 @@ See docs/ios.md. Honest scope: the DtnFfi bridge needs a live
 native library and an Apple toolchain, so the wire/storage behavior
 underneath is verified by the Rust-side dtn-ffi tests and the
 desktop self test (as for the Android JNI shim); the model/JSON
-layer is covered by the XCTest suite. Background sync service,
-notifications, attachments and the receipts FFI surface remain future
-work on the same ABI.
+layer is covered by the XCTest suite. Background sync services and push notifications remain future work on the same ABI; the receipts + attachments FFI surface landed in Phase 26.
+
+### FFI receipts + attachments surface (Phase 26)
+
+The Phase 23 attachment and Phase 24 read-receipt engine state is now
+reachable from every platform shell over the dtn-ffi C ABI without any
+wire-format parsing in the UI layer:
+
+- `dtn_app_send_read_receipts` / `dtn_app_message_confirmed` — the
+  read-receipt lifecycle as plain C calls (acknowledge the inbound
+  messages of a peer; query confirmed-read per outbound message).
+- `dtn_app_poll_inbox_with_receipts` — the inbox drain returning
+  `{"messages":[...],"receipts":[{"from":..,"acked_at":..,"confirmed":..}]}`;
+  receipts are applied by the engine and never become chat rows, and
+  spoofed or foreign keys confirm nothing.
+- `dtn_app_send_file` / `dtn_app_extract_attachment` — real file
+  attachments as DTNA1 bundles and byte-for-byte extraction with the
+  stored filename re-validated.
+
+The flat message JSON shapes the desktop shell's `json.c` reader
+consumes are unchanged (new entry points are opt-in), and the Android
+JNI shim mirrors all five calls (sendReadReceipts,
+pollInboxWithReceipts, messageConfirmed, sendFile, extractAttachment).
+The C-ABI tests drive the real node engine end to end: a full
+two-node receipt cycle (deliver, read, acknowledge, idempotent second
+ack, combined-poll "confirmed": 2, per-message state), a file send +
+extract round trip with the unknown-id error path, and the NULL
+handle/string error protocol of the new entry points.
 
 ## Roadmap
 
@@ -500,5 +524,6 @@ work on the same ABI.
 - Done: Phase 22 iOS shell — shells/ios (Swift/SwiftPM) embeds the real libdtn_ffi on iOS through the CDtnFfi C target and the DtnFfi Swift bridge over the exact dtn_app_* C ABI, with typed JSON models, a @MainActor ChatController, a SwiftUI chat example and an XCTest model suite that runs without the native library (docs/ios.md).
 - Done: Phase 23 attachments — dtn-app::attachments DTNA1 payload format (strict decode, safe-filename validation, 8 MiB cap), App::send_file / attachment_for / extract_attachment, attachment bytes persisted in the app database, chat CLI send-file/extract (docs/apps.md).
 - Done: Phase 24 remote read receipts — dtn-app::receipts DTNR1 payload format (strict decode, bundle-key correlation, spoof-proof confirmation), App::send_read_receipts / poll_inbox_with_receipts / message_confirmed, ✓read rendering, in-place database migration (docs/apps.md).
-- Next: TLS (RFC 9174 §4.4), TLE-driven pass prediction, a network-wide management plane, background sync services and push notifications on the mobile shells, an FFI/receipts surface for the platform shells.
+- Done: Phase 26 FFI receipts + attachments surface — dtn-app_send_read_receipts / dtn_app_poll_inbox_with_receipts / dtn_app_message_confirmed / dtn_app_send_file / dtn_app_extract_attachment (dtn-ffi C ABI + header + JNI shim parity), C-ABI tests over the real node engine, docs, workspace 0.25.0.
+- Next: TLS (RFC 9174 §4.4), TLE-driven pass prediction, a network-wide management plane, background sync services and push notifications on the mobile shells.
 

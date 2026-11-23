@@ -86,6 +86,33 @@ int64_t dtn_app_mark_read(dtn_app_handle *handle, const char *peer);
 int32_t dtn_app_add_contact(dtn_app_handle *handle, const char *alias, const char *eid);
 char *dtn_app_resolve_contact(dtn_app_handle *handle, const char *alias);
 
+/* Read receipts (Phase 26). send acknowledges every inbound message of
+ * peer_uri not yet receipted (one DTNR1 bundle; 0 = nothing pending,
+ * no bundle created) and returns the acknowledged count, or -1.
+ * confirmed returns 1 / 0 for one outbound message's confirmed-read
+ * state, or -1 on error. */
+int64_t dtn_app_send_read_receipts(dtn_app_handle *handle, const char *peer_uri,
+                                   uint64_t lifetime);
+int64_t dtn_app_message_confirmed(dtn_app_handle *handle, int64_t message_id);
+
+/* Drain delivered bundles AND apply arriving read receipts (Phase 26).
+ * Returns a JSON object
+ *   {"messages":[...],"receipts":[{"from":"..","acked_at":..,
+ *                                 "confirmed":<out-rows-confirmed>}, ..]}
+ * or NULL on error. Receipts never become chat rows. */
+char *dtn_app_poll_inbox_with_receipts(dtn_app_handle *handle);
+
+/* Attachments (Phase 26). send_file queues a real file as one DTNA1
+ * bundle and returns the message row id, or -1. extract_attachment
+ * writes the stored bytes of one message byte-for-byte into dest_dir
+ * (stored filename re-validated) and returns a newly allocated path
+ * (free with dtn_string_free), or NULL on error (unknown message id,
+ * no attachment, unsafe stored name). */
+int64_t dtn_app_send_file(dtn_app_handle *handle, const char *peer_uri,
+                          const char *path, uint64_t lifetime);
+char *dtn_app_extract_attachment(dtn_app_handle *handle, int64_t message_id,
+                                 const char *dest_dir);
+
 #ifdef __cplusplus
 }
 #endif

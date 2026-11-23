@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.25.0 (2026-11-23)
+
+Phase 26 — FFI receipts + attachments surface: the two platform-shell
+gaps the Phase 23/24 honest-scope notes called out, over the dtn-ffi
+C ABI with no new dependencies.
+
+- dtn-ffi (new C ABI entry points, header updated, existing JSON
+  shapes unchanged):
+  - `dtn_app_send_read_receipts(handle, peer, lifetime)` acknowledges
+    every inbound message of the peer not yet receipted (Phase 24
+    engine semantics); returns the acknowledged count, 0 when nothing
+    is pending (no bundle created).
+  - `dtn_app_message_confirmed(handle, id)` exposes per-row
+    confirmed-read state as 1 / 0 (-1 on error).
+  - `dtn_app_poll_inbox_with_receipts(handle)` drains the inbox and
+    returns `{"messages":[...],"receipts":[{"from":..,"acked_at":..,
+    "confirmed":..}]}`; receipts are applied to the conversations and
+    never become chat rows; spoofed or foreign keys confirm nothing.
+  - `dtn_app_send_file(handle, peer, path, lifetime)` queues a real
+    file as one DTNA1 bundle (Phase 23 semantics) and returns the
+    message row id (readable file, validated filename, 8 MiB cap).
+  - `dtn_app_extract_attachment(handle, id, dest_dir)` writes the
+    stored bytes byte-for-byte into dest_dir (stored filename
+    re-validated) and returns the written path.
+- JNI shim parity: sendReadReceipts / pollInboxWithReceipts /
+  messageConfirmed / sendFile / extractAttachment exported over the
+  same C ABI calls, so the Android shell adopts the surface without
+  new native logic.
+- 3 new C-ABI tests over the real node engine: the full two-node
+  receipt cycle through the ABI (deliver, read, acknowledge,
+  idempotent second ack, combined poll reporting "confirmed": 2,
+  per-message confirmed state, no receipt chat rows), file send +
+  extract through the ABI (byte-identical content, unknown-id error,
+  no-attachment error message), and the NULL handle/string error
+  protocol of all five new entry points (no crashes).
+- docs: ffi.md JSON shapes + honest scope updated; architecture.md
+  Phase 26 section + roadmap advanced; workspace bumped to 0.25.0.
+- Honest scope: the desktop shell (json.c) is unchanged and keeps
+  parsing the flat message shapes (the new entry points are opt-in);
+  the Kotlin/iOS wrappers adopt the surface through the mirrored
+  exports without logic changes; per-hop delivery state and FFI-side
+  transport progress reporting remain future work.
+
 ## 0.24.0 (2026-11-22)
 
 Phase 25 — web-of-trust key introductions (the next "Next" item of
