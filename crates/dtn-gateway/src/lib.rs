@@ -15,10 +15,14 @@
 //!   its purest: peers are only contactable inside scheduled contact
 //!   windows (pass windows), so the gateway sleeps between passes and
 //!   exchanges everything queued when the bird comes overhead.
+//! * **TLE pass prediction** ([`tle`], Phase 27) — compute those
+//!   satellite windows from a real NORAD two-line element set, so a
+//!   ground-station schedule is generated from orbital mechanics
+//!   instead of a hand-maintained file.
 //!
-//! Both run the SAME wire protocol as every other DTN-Link contact
-//! (dtn-daemon `exchange`), so a gateway is peer-compatible with any
-//! DTN-Link node, daemon or adapter — nothing is faked.
+//! Both gateways run the SAME wire protocol as every other DTN-Link
+//! contact (dtn-daemon `exchange`), so a gateway is peer-compatible
+//! with any DTN-Link node, daemon or adapter — nothing is faked.
 //!
 //! Management (Phase 15): `contact_counted` reports per-contact
 //! bundle counters and can record every gateway contact (success or
@@ -27,6 +31,7 @@
 
 pub mod internet;
 pub mod satellite;
+pub mod tle;
 
 use dtn_bpv7::Eid;
 use dtn_core::Node;

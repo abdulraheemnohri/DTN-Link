@@ -452,6 +452,111 @@ fn main() {
                 }
             }
         }
+        Some("tle") => {
+            // Phase 27: TLE-driven satellite pass prediction.
+            //
+            // usage:
+            //   dtn-link tle passes <tle-file> <lat> <lon> [min-elevation-deg] [hours]
+            //   dtn-link tle plan <tle-file> <lat> <lon> <peer-addr:port> [min-elevation-deg] [hours]
+            let sub = args.get(1).map(String::as_str);
+            match sub {
+                Some("passes") | Some("plan") => {
+                    let plan_mode = sub == Some("plan");
+                    // offsets: file lat lon [addr] [min-elev] [hours]
+                    let (elev_i, hours_i) = if plan_mode { (6, 7) } else { (5, 6) };
+                    if (plan_mode && args.len() < 6) || (!plan_mode && args.len() < 5) {
+                        eprintln!(
+                            "usage:\n  dtn-link tle passes <tle-file> <lat> <lon> [min-elevation-deg] [hours]\n  dtn-link tle plan <tle-file> <lat> <lon> <peer-addr:port> [min-elevation-deg] [hours]"
+                        );
+                        std::process::exit(2);
+                    }
+                    let tle_text = std::fs::read_to_string(&args[2]).unwrap_or_else(|e| {
+                        eprintln!("cannot read TLE file {}: {e}", args[2]);
+                        std::process::exit(1);
+                    });
+                    let lat: f64 = args[3].parse().unwrap_or_else(|_| {
+                        eprintln!("error: latitude must be a number in degrees (north positive)");
+                        std::process::exit(2);
+                    });
+                    let lon: f64 = args[4].parse().unwrap_or_else(|_| {
+                        eprintln!("error: longitude must be a number in degrees (east positive)");
+                        std::process::exit(2);
+                    });
+                    let min_elev: f64 = args
+                        .get(elev_i)
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(10.0);
+                    let hours: f64 = args
+                        .get(hours_i)
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(24.0);
+                    let tle = dtn_gateway::tle::Tle::parse(&tle_text).unwrap_or_else(|e| {
+                        eprintln!("invalid TLE: {e}");
+                        std::process::exit(1);
+                    });
+                    let gs = dtn_gateway::tle::GroundStation {
+                        lat_deg: lat,
+                        lon_deg: lon,
+                        alt_km: 0.0,
+                        min_elevation_deg: min_elev,
+                    };
+                    let p = dtn_gateway::tle::Predictor::new(&tle, &gs).unwrap_or_else(|e| {
+                        eprintln!("invalid ground station: {e}");
+                        std::process::exit(2);
+                    });
+                    println!("{tle}");
+                    println!(
+                        "Orbit: altitude ~{:.0} km, period ~{:.1} min; station {:.3},{:.3} min-elevation {min_elev} deg",
+                        tle.altitude_km(),
+                        tle.period_s() / 60.0,
+                        lat,
+                        lon
+                    );
+                    let from = unix_now() as i64;
+                    if plan_mode {
+                        let addr = &args[5];
+                        let plan = p.to_contact_plan(addr, from, hours);
+                        if plan.contacts.is_empty() {
+                            println!("No passes of at least {min_elev} deg in the next {hours} h.");
+                        }
+                        print!("{}", plan.to_text());
+                        println!("\n(Save this to a file and hand it to SatelliteGateway::new(ContactPlan::parse(...)) — the windows are start-inclusive, end-exclusive unix seconds.)");
+                    } else {
+                        let passes = p.passes_between(from, hours);
+                        if passes.is_empty() {
+                            println!("No passes of at least {min_elev} deg in the next {hours} h.");
+                        }
+                        for pass in &passes {
+                            let dur = pass.duration_s();
+                            let human = format!("{}m{}s", dur / 60, dur % 60);
+                            println!(
+                                "{}  {}  window {}s ({})  max-elev {:.1} deg",
+                                pass.start,
+                                pass.end,
+                                dur,
+                                human,
+                                pass.max_elevation_deg
+                            );
+                        }
+                        if let Some(next) = p.next_pass(from) {
+                            println!(
+                                "Next pass in {} s ({}..{})",
+                                next.start.saturating_sub(from as u64),
+                                next.start,
+                                next.end
+                            );
+                        }
+                        println!("\n(Windows are unix seconds: inclusive start, exclusive end — the ContactPlan format. Generate a ready plan with: dtn-link tle plan <tle-file> <lat> <lon> <peer-addr>)");
+                    }
+                }
+                _ => {
+                    eprintln!(
+                        "usage:\n  dtn-link tle passes <tle-file> <lat> <lon> [min-elevation-deg] [hours]\n  dtn-link tle plan <tle-file> <lat> <lon> <peer-addr:port> [min-elevation-deg] [hours]"
+                    );
+                    std::process::exit(2);
+                }
+            }
+        }
         Some("keyring") => {
             let mut home = dtn_home();
             home.push("keys.db");
@@ -784,7 +889,7 @@ fn main() {
                 }
             }
         }
-        Some("version") => println!("dtn-link 0.24.0 (BPv7, TCPCLv4, BPSec, web-of-trust, gateways, federation, diagnostics, app layer, attachments, FFI)"),
+        Some("version") => println!("dtn-link 0.26.0 (BPv7, TCPCLv4, BPSec, web-of-trust, gateways, TLE pass prediction, federation, diagnostics, app layer, attachments, receipts, FFI)"),
         _ => {
             eprintln!(
                 "dtn-link — decentralized DTN communication
@@ -806,6 +911,8 @@ usage:
   dtn-link daemon --listen 0.0.0.0:4556 [--peers host:port,...] [--strategy epidemic|spray|opportunistic] [--interval 30] [--no-enforce-tofu] [--insecure]
   dtn-link verify <pubkey-hex>   (bundle bytes on stdin)
   dtn-link keyring wot add-root|list|introduce|record|untrust
+  dtn-link tle passes <tle-file> <lat> <lon> [min-elevation-deg] [hours]
+  dtn-link tle plan <tle-file> <lat> <lon> <peer-addr:port> [min-elevation-deg] [hours]
   dtn-link decode         (bundle bytes on stdin, prints structure)
   dtn-link federation show <plan-file> [regions-file]
   dtn-link federation route <plan-file> <regions-file> <eid>

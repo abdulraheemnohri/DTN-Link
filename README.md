@@ -9,7 +9,7 @@ without requiring a SIM card, cellular subscription or Wi-Fi router for every
 communication. It uses Bundle Protocol v7 (RFC 9171), store-carry-forward
 routing, modular physical transport adapters and optional internet gateways.
 
-## Status: Phases 1-25 (core, transports, security, adapters, gateways, diagnostics, federation, apps + attachments + read receipts, ffi, desktop + android + ios shells)
+## Status: Phases 1-27 (core, transports, security, adapters, gateways, diagnostics, federation, apps + attachments + read receipts, ffi, desktop + android + ios shells, TLE pass prediction)
 
 | Component | Status |
 |---|---|
@@ -29,12 +29,13 @@ routing, modular physical transport adapters and optional internet gateways.
 | KISS framing for LoRa TNCs / serial radio modems | implemented + tested (crates/dtn-transport::kiss) |
 | Serial-port hardware glue (cargo feature "serial") | implemented, feature-gated |
 | Internet & satellite gateways (contact plans, pass windows) | implemented + tested (crates/dtn-gateway) |
+| TLE-driven satellite pass prediction (`dtn-link tle passes` / `tle plan》) | implemented + tested (crates/dtn-gateway::tle) |
 | Interop + performance benchmark suite | implemented + tested (crates/dtn-bench) |
 | Diagnostics: health reports + kind-tagged contact history with per-contact bundle counters (`dtn-link doctor`) | implemented + tested (crates/dtn-diagnostics) |
 | Platform app engine: contacts, conversations, unread tracking, poll inbox, file attachments (`dtn-link chat send-file` / `extract`) | implemented + tested (crates/dtn-app) |
 | Remote read receipts (DTNR1 receipt bundles, bundle-key correlation, ✓read rendering) | implemented + tested (crates/dtn-app::receipts) |
 | C ABI / FFI over the app engine for platform UI shells (`libdtn_ffi` + `dtn_app_ffi.h`) | implemented + tested (crates/dtn-ffi) |
-| CLI | implemented — init/status/send/receive/bundles/chat (+ send-file/extract)/forward/daemon/doctor/verify/keyring/encrypt/decrypt/decode/federation |
+| CLI | implemented — init/status/send/receive/bundles/chat (+ send-file/extract)/forward/daemon/doctor/verify/keyring/encrypt/decrypt/decode/tle/federation |
 | RFC 9173 default contexts: BIB-HMAC-SHA2 (ctx 1), BCB-AES-GCM with primary-block AAD (ctx 2) | implemented + tested (crates/dtn-bpsec::rfc9173) |
 | Signed key rotation (TOFU + signed KeyChange announcements) | implemented + tested (crates/dtn-keyring, dtn-daemon) |
 | Web-of-trust key introductions | `dtn-keyring::wot` | DTNWI1 signed introduction announcements; BFS depth-limited trust from operator roots; cascade revocation; first verified key wins. | 25 |
@@ -99,6 +100,13 @@ For the iOS shell (Phase 22) — Swift bridge + SwiftUI app:
     dtn-link chat list        # conversations with unread badges
     dtn-link chat list bob    # one conversation, marks it read
 
+## Quick start: satellite passes from a TLE
+
+    # Download a TLE for your satellite of choice (Space-Track / Celestrak)
+    dtn-link tle passes iss.tle 52.52 13.40            # next 24 h over Berlin
+    dtn-link tle plan iss.tle 52.52 13.40 gs.example.net:4556 10 48 > pass-plan.txt
+    # pass-plan.txt is a ContactPlan for SatelliteGateway::new(ContactPlan::parse(...))
+
 ## Architecture
 
 See [docs/architecture.md](docs/architecture.md),
@@ -107,7 +115,11 @@ See [docs/architecture.md](docs/architecture.md),
 [docs/ffi.md](docs/ffi.md),
 [docs/shell.md](docs/shell.md),
 [docs/android.md](docs/android.md),
-[docs/ios.md](docs/ios.md) and
+[docs/ios.md](docs/ios.md),
+[docs/gateways.md](docs/gateways.md),
+[docs/federation.md](docs/federation.md),
+[docs/benchmarks.md](docs/benchmarks.md),
+[docs/tcpclv4.md](docs/tcpclv4.md) and
 [docs/diagnostics.md](docs/diagnostics.md).
 
 ## Standards
@@ -117,8 +129,8 @@ See [docs/architecture.md](docs/architecture.md),
 - RFC 9173 — Default Security Contexts (BIB-HMAC-SHA2 context id 1 and BCB-AES-GCM context id 2 implemented in crates/dtn-bpsec::rfc9173)
 - RFC 9174 — TCP Convergence Layer v4 (TCPCLv4 session protocol implemented: SESS handshake, KEEPALIVE, acked XFER; TLS remaining)
 - KISS — LoRa TNC / serial radio modem framing (implemented in crates/dtn-transport)
+- NORAD TLE — two-line element sets for satellite pass prediction (implemented in crates/dtn-gateway::tle)
 
 ## License
 
 MIT
-
