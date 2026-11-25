@@ -9,7 +9,7 @@ without requiring a SIM card, cellular subscription or Wi-Fi router for every
 communication. It uses Bundle Protocol v7 (RFC 9171), store-carry-forward
 routing, modular physical transport adapters and optional internet gateways.
 
-## Status: Phases 1-27 (core, transports, security, adapters, gateways, diagnostics, federation, apps + attachments + read receipts, ffi, desktop + android + ios shells, TLE pass prediction)
+## Status: Phases 1-28 (core, transports, security, adapters, gateways, diagnostics, federation, apps + attachments + read receipts, ffi, desktop + android + ios shells, TLE pass prediction, TCPCLv4 multi-segment transfers)
 
 | Component | Status |
 |---|---|
@@ -24,7 +24,7 @@ routing, modular physical transport adapters and optional internet gateways.
 | Keyring: trusted public keys per EID (TOFU key distribution) | implemented + tested (crates/dtn-keyring) |
 | Secured contacts: hello key exchange, signed outbound, verified inbound (daemon) | implemented + tested (crates/dtn-daemon) |
 | Persistent node identity across restarts | implemented + tested (crates/dtn-core) |
-| Full RFC 9174 TCPCLv4 session protocol (handshake, keepalive, acked XFER) | implemented + tested (crates/dtn-tcpcl::v4) |
+| Full RFC 9174 TCPCLv4 session protocol (handshake, keepalive, acked XFER incl. chunked multi-segment transfers) | implemented + tested (crates/dtn-tcpcl::v4) |
 | Modular transport adapters: framing codecs + generic stream exchange | implemented + tested (crates/dtn-transport) |
 | KISS framing for LoRa TNCs / serial radio modems | implemented + tested (crates/dtn-transport::kiss) |
 | Serial-port hardware glue (cargo feature "serial") | implemented, feature-gated |
@@ -127,7 +127,7 @@ See [docs/architecture.md](docs/architecture.md),
 - RFC 9171 — Bundle Protocol v7
 - RFC 9172 — Bundle Protocol Security (BIB integrity block implemented; Ed25519 context)
 - RFC 9173 — Default Security Contexts (BIB-HMAC-SHA2 context id 1 and BCB-AES-GCM context id 2 implemented in crates/dtn-bpsec::rfc9173)
-- RFC 9174 — TCP Convergence Layer v4 (TCPCLv4 session protocol implemented: SESS handshake, KEEPALIVE, acked XFER; TLS remaining)
+- RFC 9174 — TCP Convergence Layer v4 (TCPCLv4 session protocol implemented: SESS handshake, KEEPALIVE, acked XFER incl. multi-segment transfers; TLS remaining)
 - KISS — LoRa TNC / serial radio modem framing (implemented in crates/dtn-transport)
 - NORAD TLE — two-line element sets for satellite pass prediction (implemented in crates/dtn-gateway::tle)
 

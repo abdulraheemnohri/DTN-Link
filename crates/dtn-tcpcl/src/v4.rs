@@ -10,14 +10,19 @@
 //! * KEEPALIVE upkeep messages.
 //! * MSG_REJECT for unknown message types.
 //! * Acknowledged bundle transfer: XFER_INIT announces transfer id and
-//!   length, XFER_SEGMENT carries the data, XFER_ACK confirms reception,
-//!   XFER_REFUSE rejects a transfer.
+//!   total length, one or more XFER_SEGMENT messages carry the data
+//!   (first segment START, last segment END), XFER_ACK confirms
+//!   reception, XFER_REFUSE rejects a transfer.
 //! * SESS_TERM session termination with reason codes.
 //!
-//! Transfers follow RFC 9174 section 3.6's "minimum overhead" policy:
-//! every transfer is a single segment with both the START and END flags
-//! set, so receivers need no segment reassembly (a documented single-
-//! segment policy case). Honest scope: TLS (section 4.4) is not
+//! Segmentation (Phase 28): `send_bundle` keeps RFC 9174 section 3.6's
+//! "minimum overhead" single-segment policy; `send_bundle_chunked`
+//! applies the section 3.6 "Predictable Message Sizing" policy,
+//! splitting a transfer into segments no larger than a fixed size.
+//! Each XFER_SEGMENT encodes its data length as an SDNV before the
+//! data octets, so the receiver reassembles segments without assuming
+//! the remainder of the announced length (the length field of
+//! section 5.2.2). Honest scope: TLS (section 4.4) is not
 //! offered (CAN_TLS is never set) and extension items are future work.
 
 use super::sdnv;
@@ -44,6 +49,10 @@ pub const MSG_SESS_TERM: u8 = 0x0a;
 pub const FLAG_SEG_START: u8 = 0x01;
 /// Message header flag: final segment of a transfer.
 pub const FLAG_SEG_END: u8 = 0x02;
+
+/// Cap on a single XFER_SEGMENT data length accepted from the wire
+/// (backed by the framing layer's 16 MiB frame limit).
+pub const MAX_SEGMENT: u64 = 16 * 1024 * 1024;
 
 /// Contact flag: entity can upgrade to TLS.
 pub const CF_CAN_TLS: u64 = 0x01;
@@ -214,6 +223,7 @@ impl Message {
             }
             Message::XferSegment { transfer_id, data, .. } => {
                 sdnv::encode_into(*transfer_id, &mut out);
+                sdnv::encode_into(data.len() as u64, &mut out);
                 out.extend_from_slice(data);
             }
             Message::SessTerm { reason, .. } => out.push(*reason),
@@ -275,6 +285,10 @@ impl Message {
             }
             MSG_XFER_SEGMENT => {
                 let (transfer_id, rest) = split_sdnv(body)?;
+                let (dlen, rest) = split_sdnv(rest)?;
+                if rest.len() as u64 != dlen {
+                    return Err(SessionError::Protocol("segment length mismatch"));
+                }
                 Message::XferSegment { transfer_id, flags, data: rest.to_vec() }
             }
             MSG_SESS_TERM => match body.first() {
@@ -310,9 +324,11 @@ pub enum Event {
 
 /// A TCPCLv4 session driving any `Read + Write` transport.
 ///
-/// In-progress incoming transfer state: (transfer id, announced length,
-/// accumulated bytes). Under the single-segment policy the announced
-/// length fully determines the data extent of the XFER_SEGMENT.
+/// In-progress incoming transfer state: (transfer id, announced total
+/// length, accumulated bytes). Segments are reassembled in arrival
+/// order: the first must carry START, the transfer completes on the
+/// segment carrying END, and no segment may overshoot the announced
+/// length.
 pub struct Session<S: Read + Write> {
     stream: S,
     pub local_eid: Vec<u8>,
@@ -357,17 +373,58 @@ impl<S: Read + Write> Session<S> {
     /// Single-segment policy: XFER_INIT announces the length, then one
     /// XFER_SEGMENT carries all bytes with START and END both set.
     pub fn send_bundle(&mut self, data: &[u8]) -> Result<u64, SessionError> {
+        self.send_bundle_chunked(data, usize::MAX)
+    }
+
+    /// Send one bundle as a transfer split into segments of at most
+    /// `segment_size` bytes (RFC 9174 section 3.6 "Predictable Message
+    /// Sizing"): the first segment carries START, the last carries END,
+    /// a middle segment carries neither, and the receiver answers with
+    /// one XFER_ACK covering the full transfer. A zero segment size is
+    /// refused; an empty payload is sent as one START|END segment
+    /// without data octets.
+    pub fn send_bundle_chunked(
+        &mut self,
+        data: &[u8],
+        segment_size: usize,
+    ) -> Result<u64, SessionError> {
+        if segment_size == 0 {
+            return Err(SessionError::Protocol("segment size must be non-zero"));
+        }
         let transfer_id = self.next_transfer_id;
         self.next_transfer_id += 1;
         self.write_msg(&Message::XferInit {
             transfer_id,
             length: data.len() as u64,
         })?;
-        self.write_msg(&Message::XferSegment {
-            transfer_id,
-            flags: FLAG_SEG_START | FLAG_SEG_END,
-            data: data.to_vec(),
-        })?;
+        if data.is_empty() {
+            self.write_msg(&Message::XferSegment {
+                transfer_id,
+                flags: FLAG_SEG_START | FLAG_SEG_END,
+                data: Vec::new(),
+            })?;
+            return Ok(transfer_id);
+        }
+        let mut offset = 0usize;
+        loop {
+            let end = offset.saturating_add(segment_size).min(data.len());
+            let mut flags = 0u8;
+            if offset == 0 {
+                flags |= FLAG_SEG_START;
+            }
+            if end == data.len() {
+                flags |= FLAG_SEG_END;
+            }
+            self.write_msg(&Message::XferSegment {
+                transfer_id,
+                flags,
+                data: data[offset..end].to_vec(),
+            })?;
+            offset = end;
+            if offset >= data.len() {
+                break;
+            }
+        }
         Ok(transfer_id)
     }
 
@@ -494,23 +551,14 @@ impl<S: Read + Write> Session<S> {
             }
             MSG_XFER_SEGMENT => {
                 let transfer_id = self.read_sdnv()?;
-                let (id, length, have) = match self.incoming.as_ref() {
-                    Some((id, length, buf)) => (*id, *length, buf.len() as u64),
-                    None => {
-                        return Err(SessionError::Protocol(
-                            "XFER_SEGMENT without a matching XFER_INIT",
-                        ))
-                    }
-                };
-                if id != transfer_id {
-                    return Err(SessionError::Protocol("XFER_SEGMENT for unknown transfer"));
+                let dlen = self.read_sdnv()?;
+                if dlen > MAX_SEGMENT {
+                    return Err(SessionError::Protocol(
+                        "segment data length exceeds the limit",
+                    ));
                 }
-                let remaining = (length - have) as usize;
-                let mut data = self.read_exact_n(remaining)?;
-                if let Some((_, _, buf)) = self.incoming.as_mut() {
-                    buf.append(&mut data);
-                }
-                Message::XferSegment { transfer_id, flags, data: Vec::new() }
+                let data = self.read_exact_n(dlen as usize)?;
+                Message::XferSegment { transfer_id, flags, data }
             }
             MSG_SESS_TERM => {
                 let reason = self.read_u8()?;
@@ -536,27 +584,58 @@ impl<S: Read + Write> Session<S> {
                 self.incoming = Some((transfer_id, length, Vec::new()));
                 None
             }
-            Message::XferSegment { transfer_id, flags, .. } => {
-                let complete = match self.incoming.as_ref() {
-                    Some((_, length, buf)) => buf.len() as u64 == *length,
-                    None => false,
+            Message::XferSegment { transfer_id, flags, data } => {
+                let (id, length, have) = match self.incoming.as_ref() {
+                    Some((id, length, buf)) => (*id, *length, buf.len()),
+                    None => {
+                        return Err(SessionError::Protocol(
+                            "XFER_SEGMENT without a matching XFER_INIT",
+                        ))
+                    }
                 };
-                if !complete {
-                    return Err(SessionError::Protocol("incomplete transfer segment"));
+                if id != transfer_id {
+                    return Err(SessionError::Protocol("XFER_SEGMENT for unknown transfer"));
                 }
-                if flags & FLAG_SEG_END == 0 {
+                let mut received = have as u64;
+                if flags & FLAG_SEG_START != 0 {
+                    if have > 0 {
+                        return Err(SessionError::Protocol(
+                            "START flag set on a non-initial segment",
+                        ));
+                    }
+                } else if have == 0 {
+                    return Err(SessionError::Protocol("first segment lacks the START flag"));
+                }
+                received += data.len() as u64;
+                if received > length {
                     return Err(SessionError::Protocol(
-                        "only single-segment transfers are supported",
+                        "segment data exceeds the announced transfer length",
                     ));
                 }
-                let (id, length, buf) = self.incoming.take().expect("incoming transfer");
-                // Acknowledge the received segment (RFC 9174 section 5.2.3).
-                self.write_msg(&Message::XferAck {
-                    transfer_id: id,
-                    ack_flags: FLAG_SEG_START | FLAG_SEG_END,
-                    received: length,
-                })?;
-                Some(Event::Bundle(buf))
+                if let Some((_, _, buf)) = self.incoming.as_mut() {
+                    buf.extend_from_slice(&data);
+                }
+                if flags & FLAG_SEG_END != 0 {
+                    if received < length {
+                        return Err(SessionError::Protocol(
+                            "final segment ends the transfer before the announced length",
+                        ));
+                    }
+                    let (_, _, buf) = self.incoming.take().expect("incoming transfer");
+                    // Acknowledge the full transfer (RFC 9174 section 5.2.3).
+                    self.write_msg(&Message::XferAck {
+                        transfer_id: id,
+                        ack_flags: FLAG_SEG_START | FLAG_SEG_END,
+                        received: length,
+                    })?;
+                    Some(Event::Bundle(buf))
+                } else if received == length {
+                    return Err(SessionError::Protocol(
+                        "transfer data complete but no END segment arrived",
+                    ));
+                } else {
+                    None
+                }
             }
             Message::XferAck { transfer_id, received, .. } => {
                 Some(Event::Acked { transfer_id, received })
@@ -768,5 +847,240 @@ mod tests {
             other => panic!("expected keepalive, got {other:?}"),
         }
         passive_thread.join().unwrap();
+    }
+
+    #[test]
+    fn multi_segment_transfer() {
+        let (a_sock, p_sock) = channel();
+        let mut active = Session::new(a_sock, "dtn://node-a", 5);
+        let passive = Session::new(p_sock, "dtn://node-b", 5);
+
+        let data: Vec<u8> = (0..25000u32).map(|i| (i % 251) as u8).collect();
+        let data_clone = data.clone();
+
+        let passive_thread = std::thread::spawn(move || {
+            let mut passive = passive;
+            passive.handshake(false).unwrap();
+            let bundle = loop {
+                match passive.pump().unwrap() {
+                    Some(Event::Bundle(b)) => break b,
+                    _ => continue,
+                }
+            };
+            bundle
+        });
+
+        active.handshake(true).unwrap();
+        // 25000 bytes in segments of 1000 -> 25 segments; the receiver
+        // must reassemble them byte-for-byte and ack the full length.
+        let tid = active.send_bundle_chunked(&data_clone, 1000).unwrap();
+        let bundle = passive_thread.join().unwrap();
+        assert_eq!(bundle, data);
+
+        let mut acked = false;
+        while !acked {
+            match active.pump().unwrap() {
+                Some(Event::Acked { transfer_id, received }) => {
+                    assert_eq!(transfer_id, tid);
+                    assert_eq!(received, data.len() as u64);
+                    acked = true;
+                }
+                _ => continue,
+            }
+        }
+    }
+
+    #[test]
+    fn chunked_empty_transfer_is_one_start_end_segment() {
+        let (a_sock, p_sock) = channel();
+        let mut active = Session::new(a_sock, "dtn://node-a", 5);
+        let mut passive = Session::new(p_sock, "dtn://node-b", 5);
+
+        let passive_thread = std::thread::spawn(move || {
+            passive.handshake(false).unwrap();
+            let bundle = loop {
+                match passive.pump().unwrap() {
+                    Some(Event::Bundle(b)) => break b,
+                    _ => continue,
+                }
+            };
+            bundle
+        });
+
+        active.handshake(true).unwrap();
+        let tid = active.send_bundle_chunked(b"", 64).unwrap();
+        assert_eq!(tid, 1);
+        assert_eq!(passive_thread.join().unwrap(), b"");
+        let mut acked = false;
+        while !acked {
+            match active.pump().unwrap() {
+                Some(Event::Acked { received, .. }) => {
+                    assert_eq!(received, 0);
+                    acked = true;
+                }
+                _ => continue,
+            }
+        }
+    }
+
+    #[test]
+    fn chunked_zero_segment_size_is_refused() {
+        let (a_sock, p_sock) = channel();
+        let mut active = Session::new(a_sock, "dtn://a", 0);
+        let _passive = Session::new(p_sock, "dtn://b", 0);
+        assert!(matches!(
+            active.send_bundle_chunked(b"hi", 0),
+            Err(SessionError::Protocol(_))
+        ));
+    }
+
+    /// Pump `count` messages, returning every outcome in order.
+    fn pump_count(
+        reader: &mut Session<TcpStream>,
+        count: usize,
+    ) -> Vec<Result<Option<Event>, SessionError>> {
+        let mut out = Vec::new();
+        for _ in 0..count {
+            out.push(reader.pump());
+        }
+        out
+    }
+
+    fn expect_protocol(err: Result<Option<Event>, SessionError>) {
+        match err {
+            Err(SessionError::Protocol(_)) => {}
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn first_segment_without_start_flag_is_rejected() {
+        let (a_sock, p_sock) = channel();
+        let reader = Session::new(p_sock, "dtn://b", 0);
+        let mut writer = Session::new(a_sock, "dtn://a", 0);
+        let th = std::thread::spawn(move || {
+            let mut reader = reader;
+            reader.handshake(false).unwrap();
+            pump_count(&mut reader, 3)
+        });
+        writer.handshake(true).unwrap();
+        for m in [
+            Message::XferInit { transfer_id: 1, length: 6 },
+            Message::XferSegment { transfer_id: 1, flags: 0, data: b"abc".to_vec() },
+            Message::XferSegment { transfer_id: 1, flags: FLAG_SEG_END, data: b"def".to_vec() },
+        ] {
+            writer.write_msg(&m).unwrap();
+        }
+        let results = th.join().unwrap();
+        expect_protocol(results.remove(1));
+    }
+
+    #[test]
+    fn start_flag_on_middle_segment_is_rejected() {
+        let (a_sock, p_sock) = channel();
+        let reader = Session::new(p_sock, "dtn://b", 0);
+        let mut writer = Session::new(a_sock, "dtn://a", 0);
+        let th = std::thread::spawn(move || {
+            let mut reader = reader;
+            reader.handshake(false).unwrap();
+            pump_count(&mut reader, 3)
+        });
+        writer.handshake(true).unwrap();
+        for m in [
+            Message::XferInit { transfer_id: 2, length: 6 },
+            Message::XferSegment { transfer_id: 2, flags: FLAG_SEG_START, data: b"abc".to_vec() },
+            Message::XferSegment { transfer_id: 2, flags: FLAG_SEG_START, data: b"def".to_vec() },
+        ] {
+            writer.write_msg(&m).unwrap();
+        }
+        let results = th.join().unwrap();
+        assert_eq!(results.remove(1).unwrap(), None);
+        expect_protocol(results.remove(1));
+    }
+
+    #[test]
+    fn segment_overshoot_is_rejected() {
+        let (a_sock, p_sock) = channel();
+        let reader = Session::new(p_sock, "dtn://b", 0);
+        let mut writer = Session::new(a_sock, "dtn://a", 0);
+        let th = std::thread::spawn(move || {
+            let mut reader = reader;
+            reader.handshake(false).unwrap();
+            pump_count(&mut reader, 3)
+        });
+        writer.handshake(true).unwrap();
+        for m in [
+            Message::XferInit { transfer_id: 3, length: 5 },
+            Message::XferSegment { transfer_id: 3, flags: FLAG_SEG_START, data: b"abcd".to_vec() },
+            Message::XferSegment { transfer_id: 3, flags: 0, data: b"xx".to_vec() },
+        ] {
+            writer.write_msg(&m).unwrap();
+        }
+        let results = th.join().unwrap();
+        assert_eq!(results.remove(1).unwrap(), None);
+        expect_protocol(results.remove(1));
+    }
+
+    #[test]
+    fn final_segment_short_of_length_is_rejected() {
+        let (a_sock, p_sock) = channel();
+        let reader = Session::new(p_sock, "dtn://b", 0);
+        let mut writer = Session::new(a_sock, "dtn://a", 0);
+        let th = std::thread::spawn(move || {
+            let mut reader = reader;
+            reader.handshake(false).unwrap();
+            pump_count(&mut reader, 3)
+        });
+        writer.handshake(true).unwrap();
+        for m in [
+            Message::XferInit { transfer_id: 4, length: 10 },
+            Message::XferSegment { transfer_id: 4, flags: FLAG_SEG_START, data: b"abcde".to_vec() },
+            Message::XferSegment { transfer_id: 4, flags: FLAG_SEG_END, data: b"xy".to_vec() },
+        ] {
+            writer.write_msg(&m).unwrap();
+        }
+        let results = th.join().unwrap();
+        assert_eq!(results.remove(1).unwrap(), None);
+        expect_protocol(results.remove(1));
+    }
+
+    #[test]
+    fn complete_transfer_without_end_segment_is_rejected() {
+        let (a_sock, p_sock) = channel();
+        let reader = Session::new(p_sock, "dtn://b", 0);
+        let mut writer = Session::new(a_sock, "dtn://a", 0);
+        let th = std::thread::spawn(move || {
+            let mut reader = reader;
+            reader.handshake(false).unwrap();
+            pump_count(&mut reader, 3)
+        });
+        writer.handshake(true).unwrap();
+        for m in [
+            Message::XferInit { transfer_id: 5, length: 6 },
+            Message::XferSegment { transfer_id: 5, flags: FLAG_SEG_START, data: b"abc".to_vec() },
+            Message::XferSegment { transfer_id: 5, flags: 0, data: b"def".to_vec() },
+        ] {
+            writer.write_msg(&m).unwrap();
+        }
+        let results = th.join().unwrap();
+        assert_eq!(results.remove(1).unwrap(), None);
+        expect_protocol(results.remove(1));
+    }
+
+    #[test]
+    fn segment_wire_layout_carries_data_length() {
+        let m = Message::XferSegment {
+            transfer_id: 9,
+            flags: FLAG_SEG_START,
+            data: b"abcdef".to_vec(),
+        };
+        let enc = m.encode();
+        // header octet + SDNV transfer id (1 byte for 9) + SDNV length
+        // (1 byte for 6) + data.
+        assert_eq!(enc[0], (MSG_XFER_SEGMENT << 4) | FLAG_SEG_START);
+        assert_eq!(enc[1], 9);
+        assert_eq!(enc[2], 6);
+        assert_eq!(&enc[3..], b"abcdef");
+        assert_eq!(&Message::decode(&enc).unwrap(), &m);
     }
 }

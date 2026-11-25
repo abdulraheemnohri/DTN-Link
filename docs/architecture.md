@@ -209,13 +209,30 @@ Two transports exist:
   (dtn-tcpcl::v4) — `dtn!` contact header, SESS_INIT/SESS_ACK
   handshake with session EIDs and keepalive negotiation, KEEPALIVE,
   XFER_INIT/XFER_SEGMENT/XFER_ACK/XFER_REFUSE acknowledged transfers
-  (single START/END segment policy), SESS_REFUSE on version mismatch,
-  MSG_REJECT for unknown types, SESS_TERM with reason codes.
-  Streaming `Session` driver over any Read+Write transport with typed
-  events. dtn-daemon `exchange_v4()` uses it for contacts.
+  (single START/END segment or chunked multi-segment policy),
+  SESS_REFUSE on version mismatch, MSG_REJECT for unknown types,
+  SESS_TERM with reason codes. Streaming `Session` driver over any
+  Read+Write transport with typed events. dtn-daemon
+  `exchange_v4()` uses it for contacts.
 
-Honest limitation: TLS (RFC 9174 §4.4), extension items and
-multi-segment transfers remain future work.
+### Multi-segment transfers (Phase 28)
+
+XFER_SEGMENT messages now carry their data length (SDNV) between the
+transfer id and the data octets, and
+`Session::send_bundle_chunked` splits a transfer into segments of a
+fixed size (RFC 9174 section 3.6 "Predictable Message Sizing"):
+first segment START, last segment END, one XFER_ACK confirming the
+full transfer. `Session::pump` reassembles segments in arrival order
+and enforces the segment grammar — START on the first segment only,
+exactly one END, no overshoot of the announced length, and END
+landing exactly on it. `send_bundle` keeps the minimal-overhead
+single-segment policy; the daemon and benchmark callers are
+unchanged.
+
+Honest limitation: TLS (RFC 9174 §4.4) and session/transfer
+extension items remain future work; the receiver acknowledges only
+the transfer-completing segment (per-segment XFER_ACKs and reactive
+fragmentation are future work).
 
 ### Generic transport adapters (dtn-transport)
 
@@ -546,4 +563,5 @@ fetched by the operator.
 - Done: Phase 24 remote read receipts — dtn-app::receipts DTNR1 payload format (strict decode, bundle-key correlation, spoof-proof confirmation), App::send_read_receipts / poll_inbox_with_receipts / message_confirmed, ✓read rendering, in-place database migration (docs/apps.md).
 - Done: Phase 26 FFI receipts + attachments surface — dtn-app_send_read_receipts / dtn_app_poll_inbox_with_receipts / dtn_app_message_confirmed / dtn_app_send_file / dtn_app_extract_attachment (dtn-ffi C ABI + header + JNI shim parity), C-ABI tests over the real node engine, docs, workspace 0.25.0.
 - Done: Phase 27 TLE-driven satellite pass prediction — dtn-gateway::tle (validated TLE parsing, deterministic near-circular propagation, bisection-refined pass windows, ContactPlan bridge + dtn-link tle passes|plan CLI), docs, workspace 0.26.0.
+- Done: Phase 28 multi-segment transfers over the RFC 9174 TCPCLv4 session — `Session::send_bundle_chunked` ("Predictable Message Sizing" segmentation), SDNV data-length XFER_SEGMENT framing and full receiver-side segment-grammar enforcement + reassembly; docs/tcpclv4.md; workspace 0.27.0.
 - Next: TLS (RFC 9174 §4.4), full SGP4 propagation and automated TLE feed fetching, a network-wide management plane, background sync services and push notifications on the mobile shells.

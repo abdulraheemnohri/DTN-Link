@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.27.0 (2026-11-25)
+
+Phase 28 — full multi-segment transfers over the RFC 9174 TCPCLv4
+session (sections 3.6 "Predictable Message Sizing" and 5.2.2): the
+next "Next" item of the Phase 27 roadmap. No new dependencies.
+
+- dtn-tcpcl::v4:
+  - Session::send_bundle_chunked(data, segment_size) — the RFC's
+    "Predictable Message Sizing" policy: the transfer is split into
+    segments no larger than segment_size, the first carries START,
+    the last carries END, and the receiver answers with one XFER_ACK
+    covering the full transfer. A zero segment size is refused; an
+    empty payload is one START|END segment without data octets.
+    send_bundle is unchanged (minimum-overhead single segment).
+  - XFER_SEGMENT wire framing now carries its data length as an SDNV
+    between the transfer id and the data octets (the length field of
+    RFC 9174 section 5.2.2), so the receiver reassembles segments
+    without assuming "everything until the announced length" — the
+    previous framing froze the receiver into the single-segment
+    policy. The wire change is internal to this crate (both sides
+    come from the same code).
+  - The receiver (Session::pump) reassembles XFER_SEGMENTs in arrival
+    order and enforces the full segment grammar: the first segment
+    must carry START, exactly one segment carries END, no segment may
+    overshoot the announced transfer length, and the END segment must
+    land exactly on the announced length. Typed
+    SessionError::Protocol violations: START on a non-initial
+    segment, missing START on the first segment, overshoot, short
+    final segment, and a completed buffer without its END segment.
+- 7 new tests over real loopback sessions (plus an exact wire-layout
+  pin): a 25-segment 25,000-byte transfer reassembled byte-for-byte
+  with the full-length ack, an empty transfer as one START|END
+  segment, zero segment-size refusal, the four protocol-violation
+  paths (missing START on the first segment, START mid-transfer,
+  length overshoot, short final segment) and complete-without-END.
+- docs: tcpclv4.md documents the segmentation policies and the
+  chunked usage; architecture.md contact protocol updated and the
+  roadmap advanced; README TCPCLv4 rows updated; workspace bumped to
+  0.27.0.
+- Honest scope: TLS (RFC 9174 section 4.4) and session/transfer
+  extension items remain future work; the receiver acknowledges only
+  the transfer-completing segment — per-segment XFER_ACKs and
+  reactive fragmentation on partially-acked transfers are also
+  future work (the XFER_ACK semantics the daemon and benchmarks rely
+  on are unchanged).
+
 ## 0.26.0 (2026-11-24)
 
 Phase 27 — TLE-driven satellite pass prediction: the first "Next" item of
