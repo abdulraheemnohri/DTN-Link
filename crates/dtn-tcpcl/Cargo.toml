@@ -7,3 +7,12 @@ description = "TCP convergence transport for DTN-Link"
 
 [dependencies]
 dtn-bpv7.workspace = true
+rustls = { version = "0.23", optional = true }
+rustls-pemfile = { version = "2", optional = true }
+sha2 = { version = "0.10", optional = true }
+
+[dev-dependencies]
+rcgen = "0.13"
+
+[features]
+tls = ["dep:rustls", "dep:rustls-pemfile", "dep:sha2"]

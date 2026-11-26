@@ -38,9 +38,48 @@ policy. The data-length SDNV in XFER_SEGMENT is a framing detail of
 this crate: both sides of a session always come from the same code,
 and each side ignores what it does not send.
 
+## TLS session security (Phase 29)
+
+RFC 9174 section 4.4 is implemented in
+`crates/dtn-tcpcl/src/v4_tls.rs` behind the cargo feature `tls`
+(rustls + rustls-pemfile + sha2; rcgen as a test-only dependency):
+
+    cargo test -p dtn-tcpcl --features tls
+
+Per the RFC, the TLS handshake completes immediately after the TCP
+connection is established and BEFORE the contact header; the whole
+TCPCLv4 session then runs inside the TLS channel.
+
+- `TlsServerSetup::from_pem(cert_chain_pem, key_pem)` — accept-side
+  setup (PEM chain + private key, no client auth). `upgrade(tcp)`
+  wraps an accepted stream and completes the handshake, yielding a
+  `TlsServerStream`.
+- `TlsClientSetup::pinned(cert_pem, server_name)` — dial-side setup
+  with TOFU-style certificate pinning: the SHA-256 fingerprint of the
+  peer's leaf certificate DER (`cert_pin(cert_pem)`) is the only
+  accepted certificate. TLS-level handshake signatures stay fully
+  verified by rustls; only the web-PKI trust decision is replaced by
+  the pin, so an impostor without the pinned certificate's private key
+  cannot complete the handshake, and any re-issued certificate changes
+  the pin and fails closed.
+- The TLS streams implement `Read + Write`, so they plug straight
+  into `v4::Session::new` — the full session protocol (handshake,
+  keepalives, acked transfers incl. chunked segmentation, SESS_TERM)
+  runs unchanged inside TLS, and `send_bundle_chunked` is exercised
+  over TLS in the tests.
+
+Trust model: the pin replaces the web-PKI chain decision only; it is
+the transport-level analogue of the keyring's trust-on-first-use pin
+of an Ed25519 key. Bundle-layer authentication (BPSec BIB over the
+keyring) remains the application-level identity check.
+
 ## Not implemented yet (honest scope)
 
-- TLS (section 4.4): the CAN_TLS contact flag is never offered.
+- Well-known-port TLS discovery (RFC 9174 section 4.4 says nodes
+  SHOULD listen on a TLS-capable port; operators choose the port) and
+  client-certificate (mutual TLS) authentication.
+- Daemon/CLI wiring of the TLS feature (the layer is consumed
+  programmatically today).
 - Transfer/session extension items (sections 4.8 and 5.2.5).
 - Per-segment XFER_ACKs and reactive fragmentation on partially
   acknowledged transfers (the receiver acknowledges only the
@@ -66,3 +105,10 @@ The daemon uses this via `exchange_v4()`, which performs the full
 contact: handshake, acked outbound transfers selected by the routing
 engine, inbound bundles stored through the node engine, and a clean
 SESS_TERM shutdown.
+
+Over TLS (feature `tls`), pass the upgraded stream to `Session::new`
+instead of the raw TCP stream:
+
+    let tls = TlsClientSetup::pinned(&peer_cert_pem, "gateway.example.net")?
+        .upgrade(tcp_stream)?;
+    let mut sess = Session::new(tls, "dtn://node-1", 30);

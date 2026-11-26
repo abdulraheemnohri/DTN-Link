@@ -20,3 +20,7 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Tests
         run: cargo test --workspace
+      - name: Tests (TCPCLv4 TLS feature)
+        run: cargo test -p dtn-tcpcl --features tls
+      - name: Clippy (TCPCLv4 TLS feature)
+        run: cargo clippy -p dtn-tcpcl --all-targets --features tls -- -D warnings

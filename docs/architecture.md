@@ -8,13 +8,13 @@
 4. Security layer — BPSec (RFC 9172) [BIB + BCB implemented, RFC 9173 contexts BIB-HMAC-SHA2 / BCB-AES-GCM]
 5. Routing layer — epidemic, spray-and-wait, opportunistic [implemented]
 6. Storage layer — persistent SQLite queue with dedup + expiry [implemented]
-7. Convergence layer — transports [TCPCL-lite + Wi-Fi Direct owner/member + Bluetooth RFCOMM glue implemented]
+7. Convergence layer — transports [TCPCL-lite + full TCPCLv4 + TLS (Phase 29) + Wi-Fi Direct owner/member + Bluetooth RFCOMM glue implemented]
 8. Gateway layer — internet/satellite gateways [implemented — dtn-gateway (Phase 11)]
 9. Management layer — monitoring, diagnostics, configuration [implemented — dtn-diagnostics (health reports + contact log)]
 10. Federation layer — inter-region routing via gateway peers [implemented — dtn-federation (Phase 14)]
 11. Platform shell boundary — C ABI over the application layer [implemented — dtn-ffi (Phase 19); desktop shell dtn-shell (Phase 20); Android JNI shell (Phase 21); iOS Swift shell (Phase 22)]
 
-## Current implementation (Phases 1-27)
+## Current implementation (Phases 1-29)
 
 ```
 +--------------------------------------------------------+
@@ -51,6 +51,7 @@
 | dtn-routing | dtn-identity | dtn-storage (SQLite)      |
 +----------+---------------+---------------+-------------+
 | dtn-tcpcl: length-prefixed frames + TCPCLv4 (RFC 9174) |
+|   + TLS session security (feature "tls", Phase 29)      |
 +--------------------------------------------------------+
 | dtn-bpv7: CBOR, PrimaryBlock, CanonicalBlock, Eid      |
 +--------------------------------------------------------+
@@ -233,6 +234,40 @@ Honest limitation: TLS (RFC 9174 §4.4) and session/transfer
 extension items remain future work; the receiver acknowledges only
 the transfer-completing segment (per-segment XFER_ACKs and reactive
 fragmentation are future work).
+
+### TLS session security (Phase 29)
+
+RFC 9174 section 4.4 is implemented in dtn-tcpcl::v4_tls behind the
+cargo feature `tls` (rustls 0.23 + rustls-pemfile + sha2; rcgen is a
+test-only dependency). Per the RFC, the TLS handshake completes
+immediately after the TCP connection is established and BEFORE the
+contact header; the whole TCPCLv4 session then runs inside the TLS
+channel:
+
+- `TlsServerSetup::from_pem(cert_chain_pem, key_pem)` — accept side;
+  `upgrade(tcp_stream)` completes the handshake and yields a
+  `TlsServerStream`.
+- `TlsClientSetup::pinned(cert_pem, server_name)` — dial side with
+  TOFU-style certificate pinning: a custom ServerCertVerifier accepts
+  exactly the certificate whose DER matches the pinned SHA-256
+  fingerprint (`cert_pin(cert_pem)`). TLS-level handshake signatures
+  stay fully verified by rustls; only the web-PKI chain decision is
+  replaced by the pin — an impostor without the pinned certificate's
+  private key cannot complete the handshake and a re-issued
+  certificate changes the pin (fails closed). This is the
+  transport-level analogue of the keyring's TOFU pin of an Ed25519
+  key.
+- The TLS streams implement Read + Write, so `v4::Session::new` takes
+  them unchanged: the full session protocol (handshake, keepalives,
+  acked transfers incl. the Phase 28 chunked segmentation, SESS_TERM)
+  runs inside TLS, exercised by live loopback tests with freshly
+  generated self-signed certificates.
+
+Honest scope: well-known-port TLS discovery and client-certificate
+(mutual TLS) authentication are future work; the layer is consumed
+programmatically — daemon/CLI wiring of TLS contacts is the next
+step. Bundle-layer authentication (BPSec over the keyring) remains
+the application-level identity check.
 
 ### Generic transport adapters (dtn-transport)
 
@@ -493,9 +528,11 @@ app that loads the real `libdtn_ffi` (iOS static archive built by
 
 See docs/ios.md. Honest scope: the DtnFfi bridge needs a live
 native library and an Apple toolchain, so the wire/storage behavior
-underneath is verified by the Rust-side dtn-ffi tests and the
-desktop self test (as for the Android JNI shim); the model/JSON
-layer is covered by the XCTest suite. Background sync services and push notifications remain future work on the same ABI; the receipts + attachments FFI surface landed in Phase 26.
+underneath is verified by the Rust-side dtn-ffi tests and the desktop
+self test (as for the Android JNI shim); the model/JSON
+layer is covered by the XCTest suite. Background sync services and
+push notifications remain future work on the same ABI; the receipts
++ attachments FFI surface landed in Phase 26.
 
 ### FFI receipts + attachments surface (Phase 26)
 
@@ -564,4 +601,5 @@ fetched by the operator.
 - Done: Phase 26 FFI receipts + attachments surface — dtn-app_send_read_receipts / dtn_app_poll_inbox_with_receipts / dtn_app_message_confirmed / dtn_app_send_file / dtn_app_extract_attachment (dtn-ffi C ABI + header + JNI shim parity), C-ABI tests over the real node engine, docs, workspace 0.25.0.
 - Done: Phase 27 TLE-driven satellite pass prediction — dtn-gateway::tle (validated TLE parsing, deterministic near-circular propagation, bisection-refined pass windows, ContactPlan bridge + dtn-link tle passes|plan CLI), docs, workspace 0.26.0.
 - Done: Phase 28 multi-segment transfers over the RFC 9174 TCPCLv4 session — `Session::send_bundle_chunked` ("Predictable Message Sizing" segmentation), SDNV data-length XFER_SEGMENT framing and full receiver-side segment-grammar enforcement + reassembly; docs/tcpclv4.md; workspace 0.27.0.
-- Next: TLS (RFC 9174 §4.4), full SGP4 propagation and automated TLE feed fetching, a network-wide management plane, background sync services and push notifications on the mobile shells.
+- Done: Phase 29 TLS session security (RFC 9174 §4.4) — dtn-tcpcl::v4_tls (cargo feature "tls"; rustls accept/dial setups, TOFU certificate-pin verifier with full TLS signature verification, pre-contact-header TLS handshake, Session-over-TLS incl. chunked transfers; CI runs tcpcl tests + clippy with the feature), docs/tcpclv4.md, workspace 0.28.0.
+- Next: daemon/CLI wiring of TLS contacts (`--tls-cert/--tls-key/--tls-pin`), client-certificate (mutual TLS) authentication, full SGP4 propagation and automated TLE feed fetching, a network-wide management plane, background sync services and push notifications on the mobile shells.

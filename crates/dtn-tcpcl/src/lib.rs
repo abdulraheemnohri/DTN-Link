@@ -1,15 +1,21 @@
 //! dtn-tcpcl — convergence-layer transports for DTN-Link.
 //!
-//! Two transports live here:
+//! Three transports live here:
 //!
 //! * TCPCL-lite (the frame helpers below): a simple length-prefixed
 //!   protocol used by the Phase 4 daemon; kept for compatibility.
 //! * RFC 9174 TCPCLv4 (the `v4` module): the full IETF session
 //!   protocol — contact negotiation, keepalives, acknowledged
 //!   transfers and session termination (Phase 7).
+//! * TLS session security for TCPCLv4 (the `v4_tls` module, cargo
+//!   feature `tls`): RFC 9174 section 4.4 TLS channel + TOFU-style
+//!   certificate pinning (Phase 29).
 
 pub mod sdnv;
 pub mod v4;
+
+#[cfg(feature = "tls")]
+pub mod v4_tls;
 
 use std::io::{Read, Write};
 use std::net::TcpStream;

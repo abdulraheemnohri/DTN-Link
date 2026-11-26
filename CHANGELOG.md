@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.28.0 (2026-11-26)
+
+Phase 29 — TLS session security for the RFC 9174 TCPCLv4 session
+(section 4.4): the first "Next" item of the Phase 28 roadmap. New
+optional dependencies, behind the cargo feature `tls`.
+
+- dtn-tcpcl::v4_tls (new module, feature-gated):
+  - TlsServerSetup::from_pem(cert_chain_pem, key_pem) — accept-side
+    TLS setup (rustls ServerConfig over a PEM chain + private key,
+    no client auth); upgrade(tcp) wraps an accepted TCP stream and
+    completes the handshake, yielding a TlsServerStream.
+  - TlsClientSetup::pinned(cert_pem, server_name) — dial-side TLS
+    setup with TOFU-style certificate pinning: a custom
+    ServerCertVerifier accepts exactly the certificate whose DER
+    matches the pinned SHA-256 fingerprint (cert_pin()). TLS-level
+    handshake signatures (TLS 1.2 and 1.3) remain fully verified by
+    the rustls provider's standard algorithm set; only the web-PKI
+    chain-of-trust decision is replaced by the pin — an impostor
+    without the pinned certificate's private key cannot complete the
+    handshake and a re-issued certificate changes the pin (fails
+    closed). This is the transport-level analogue of the keyring's
+    TOFU pin of an Ed25519 key.
+  - Per RFC 9174 section 4.4 the TLS handshake completes BEFORE the
+    TCPCL contact header; the resulting streams implement Read+Write,
+    so v4::Session::new takes them unchanged and the full session
+    protocol (handshake, keepalives, acked transfers, SESS_TERM)
+    runs inside TLS.
+- dtn-tcpcl: `tls` cargo feature (rustls 0.23, rustls-pemfile 2,
+  sha2 0.10; rcgen 0.13 as a test-only dependency). Without the
+  feature nothing changes — the crate and its dependents build and
+  test exactly as before.
+- 7 new tests (cfg(feature = "tls"), all live over real loopback TLS
+  with freshly generated self-signed certificates): a full two-way
+  TCPCLv4 session inside TLS (handshake, acked transfer, reply,
+  SESS_TERM), the Phase 28 chunked multi-segment policy exercised
+  over TLS (20,000 bytes in ~1400-byte segments reassembled
+  byte-for-byte), wrong-pin handshake failing closed on both sides,
+  pin determinism + discrimination between certificates, empty-PEM
+  rejections, a certificate/private-key mismatch rejection, and error
+  rendering.
+- CI: tcpcl tests + clippy now also run with `--features tls`.
+- docs: tcpclv4.md gains the TLS section (setup, pinning, trust
+  model, usage) with the honest scope updated; README status line
+  1-29 + TLS row + build block + RFC 9174 standards line;
+  architecture.md gains the Phase 29 section and advances the
+  roadmap; workspace bumped to 0.28.0.
+- Honest scope: well-known-port TLS discovery and client-certificate
+  (mutual TLS) authentication are future work; the layer is consumed
+  programmatically — daemon/CLI wiring of TLS contacts is the next
+  step. Full SGP4 propagation, automated TLE feed fetching, a
+  network-wide management plane and mobile background sync also
+  remain future work.
+
 ## 0.27.0 (2026-11-25)
 
 Phase 28 — full multi-segment transfers over the RFC 9174 TCPCLv4
@@ -333,8 +386,8 @@ Android JNI, iOS Swift).
   - `Sources/DtnShell/ChatController.swift`: @MainActor
     ObservableObject over the bridge — startup catch-up poll,
     conversation list with unread badges, per-peer history,
-    alias/raw recipient resolution (dtn://, ipn:, dtn:none, bare
-    names) and status text (errors surfaced, never crashes).
+    alias/raw recipient resolution (dtn://, ipn:, dtn:none,
+    bare names) and status text (errors surfaced, never crashes).
   - `Example/ios/Views`: SwiftUI chat app — ShellApp entry point
     (node opens in Application Support/DTNLink, DTN_NODE_NUMBER env
     override) and ChatView: conversation list, unread badge
@@ -521,8 +574,8 @@ Phase 18 — platform application layer (Phases 7-9 foundation).
   - Contacts — human aliases mapped to EID URIs (add/update with
     ON CONFLICT re-pointing, resolve, list).
   - Conversations — per-peer message threads with direction (in/out),
-    body, timestamp, read state and the carrying bundle's identity
-    key for status correlation.
+    body, timestamp, read state and the carrying bundle's identity key
+    for status correlation.
   - Unread tracking — per-conversation and total unread counters plus
     mark_read per peer (idempotent), the notification-badge data.
   - Poll-based inbox — App::poll_inbox() drains the node engine's
@@ -580,9 +633,7 @@ Phase 17 — MITM enforcement + signed key rotation.
   `SecurityCtx::pending_rotation` lets a rotated node announce its
   new key during the hello. In strict (enforcing) mode, signed bundles
   from sources with no trusted key are DROPPED instead of accepted
-  with a log line. The hello probe distinguishes a rotation frame
-  (DTNKC1 magic) from a first bundle frame (legacy peers) and from
-  end-of-batch, so 0.15 peers interoperate unchanged.
+  with a log line.
 - cli: daemon gains `--no-enforce-tofu` (legacy warn-only behavior;
   enforcement is the default); the federation sweep SecurityCtx uses
   enforcement; usage text + version string updated (0.16.0).
