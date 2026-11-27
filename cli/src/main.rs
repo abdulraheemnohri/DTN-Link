@@ -333,6 +333,45 @@ fn main() {
                 home.push("contacts.db");
                 Some(home)
             };
+            // Phase 30: TLS wiring (RFC 9174 section 4.4). The
+            // accept side takes --tls-cert + --tls-key (PEM files);
+            // outgoing contacts dial TLS with --tls-pin (64-char hex
+            // SHA-256 of the peer certificate DER, or @cert.pem) and
+            // --tls-name (TLS SNI, default "localhost"). Requires the
+            // cargo feature "tls"; otherwise the daemon fails closed.
+            let tls_cert = args.iter().position(|a| a == "--tls-cert").and_then(|i| args.get(i + 1));
+            let tls_key = args.iter().position(|a| a == "--tls-key").and_then(|i| args.get(i + 1));
+            let tls_pin = args.iter().position(|a| a == "--tls-pin").and_then(|i| args.get(i + 1));
+            let tls_name = args.iter().position(|a| a == "--tls-name").and_then(|i| args.get(i + 1));
+            let tls_server = match (tls_cert, tls_key) {
+                (Some(c), Some(k)) => {
+                    let cert_chain_pem = std::fs::read_to_string(c).unwrap_or_else(|e| {
+                        eprintln!("error: cannot read TLS cert {c}: {e}");
+                        std::process::exit(2);
+                    });
+                    let key_pem = std::fs::read_to_string(k).unwrap_or_else(|e| {
+                        eprintln!("error: cannot read TLS key {k}: {e}");
+                        std::process::exit(2);
+                    });
+                    Some(dtn_daemon::TlsServerPem { cert_chain_pem, key_pem })
+                }
+                (Some(_), None) | (None, Some(_)) => {
+                    eprintln!("error: --tls-cert and --tls-key must be given together");
+                    std::process::exit(2);
+                }
+                _ => None,
+            };
+            let tls_client = match tls_pin {
+                Some(p) => Some(dtn_daemon::TlsPeerPin {
+                    pin_spec: p.clone(),
+                    server_name: tls_name.map(String::from).unwrap_or_else(|| "localhost".into()),
+                }),
+                None if tls_name.is_some() => {
+                    eprintln!("error: --tls-name requires --tls-pin");
+                    std::process::exit(2);
+                }
+                _ => None,
+            };
             let cfg = dtn_daemon::DaemonConfig {
                 listen,
                 peers,
@@ -342,6 +381,8 @@ fn main() {
                 keyring,
                 contact_log,
                 enforce_tofu,
+                tls_server,
+                tls_client,
             };
             dtn_daemon::run(cfg).expect("daemon failed");
         }
@@ -908,7 +949,7 @@ usage:
   dtn-link chat poll
   dtn-link chat list [alias|eid]
   dtn-link forward <dtn://peer> [strategy]
-  dtn-link daemon --listen 0.0.0.0:4556 [--peers host:port,...] [--strategy epidemic|spray|opportunistic] [--interval 30] [--no-enforce-tofu] [--insecure]
+  dtn-link daemon --listen 0.0.0.0:4556 [--peers host:port,...] [--strategy epidemic|spray|opportunistic] [--interval 30] [--no-enforce-tofu] [--insecure] [--tls-cert pem --tls-key pem | --tls-pin hex|@pem --tls-name host]
   dtn-link verify <pubkey-hex>   (bundle bytes on stdin)
   dtn-link keyring wot add-root|list|introduce|record|untrust
   dtn-link tle passes <tle-file> <lat> <lon> [min-elevation-deg] [hours]

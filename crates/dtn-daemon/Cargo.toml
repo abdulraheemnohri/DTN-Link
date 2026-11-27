@@ -15,3 +15,9 @@ dtn-bpsec.workspace = true
 dtn-keyring.workspace = true
 dtn-diagnostics.workspace = true
 rusqlite.workspace = true
+
+[features]
+tls = ["dtn-tcpcl/tls"]
+
+[target.'cfg(feature = "tls")'.dev-dependencies]
+rcgen = "0.13"

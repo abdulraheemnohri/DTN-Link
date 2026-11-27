@@ -34,7 +34,15 @@
 //! bundles were sent and newly stored per contact; `exchange` and
 //! `exchange_v4` remain the uncounted wrappers.
 //!
-//! Honest scope: TLS (RFC 9174 §4.4) remains future work. A rotation
+//! TLS (Phase 30): with the cargo feature "tls" and a TLS config,
+//! incoming contacts are accepted as TLS-wrapped TCPCLv4 sessions
+//! (RFC 9174 section 4.4 order: TLS handshake, then contact header)
+//! and outgoing contacts dial TLS with a pinned peer certificate;
+//! a TLS config on a binary built without the feature fails closed.
+//!
+//! Honest scope: hello-key TOFU learning is TCPCL-lite only; TLS
+//! contacts are authenticated at the transport level by the
+//! certificate pin and at the bundle level by BPSec. A rotation
 //! announcement is only understood by peers on >= 0.16; announcing a
 //! rotation to an older peer degrades that one contact (the frame is
 //! not a valid bundle). A web-of-trust is future work.
@@ -46,7 +54,23 @@ use dtn_keyring::{KeyChange, Keyring, KeyringVerifyOutcome, TofuCheck};
 use dtn_routing::Strategy;
 use dtn_tcpcl::v4::{Event, Session, SessionError, TERM_OTHER};
 use dtn_tcpcl::{read_frame, write_end_of_batch, write_frame, FrameError};
-use std::io::Write;
+
+#[cfg(feature = "tls")]
+use dtn_tcpcl::v4_tls::{cert_pin, TlsClientSetup, TlsServerSetup};
+
+/// Accept-side TLS setup, when the cargo feature "tls" is compiled
+/// in; an `Option<()>` stub keeps the daemon code feature-agnostic
+/// otherwise.
+#[cfg(feature = "tls")]
+type TlsServerOpt = Option<Arc<TlsServerSetup>>;
+#[cfg(not(feature = "tls"))]
+type TlsServerOpt = Option<()>;
+
+#[cfg(feature = "tls")]
+type TlsClientOpt = Option<Arc<TlsClientSetup>>;
+#[cfg(not(feature = "tls"))]
+type TlsClientOpt = Option<()>;
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -66,6 +90,32 @@ pub struct DaemonConfig {
     /// Phase 17: reject contacts whose hello key differs from the
     /// trusted key without a valid signed rotation (MITM hardening).
     pub enforce_tofu: bool,
+    /// Phase 30: accept-side TLS (RFC 9174 section 4.4). When set,
+    /// incoming contacts are TLS-wrapped TCPCLv4 sessions; requires
+    /// the cargo feature "tls" (rejected at startup otherwise).
+    pub tls_server: Option<TlsServerPem>,
+    /// Phase 30: dial-side TLS for outgoing peer contacts — the
+    /// pinned peer certificate and the TLS server name. Requires
+    /// the cargo feature "tls".
+    pub tls_client: Option<TlsPeerPin>,
+}
+
+/// Accept-side TLS configuration (RFC 9174 section 4.4): the PEM
+/// certificate chain and private key served to incoming contacts.
+#[derive(Clone)]
+pub struct TlsServerPem {
+    pub cert_chain_pem: String,
+    pub key_pem: String,
+}
+
+/// Dial-side TLS configuration: the pin of the peer certificate —
+/// 64 hex characters (SHA-256 of the leaf DER, see
+/// [`tls_pin_from_spec`]) or "@path/to/cert.pem" — plus the TLS
+/// server name used in the SNI extension.
+#[derive(Clone)]
+pub struct TlsPeerPin {
+    pub pin_spec: String,
+    pub server_name: String,
 }
 
 /// Per-node security context: trusted keys + signing identity.
@@ -343,10 +393,10 @@ pub fn exchange(
 /// Security: bundles are signed/verified when a SecurityCtx is given,
 /// but the v4 session EID carries no pubkey — key learning is
 /// TCPCL-lite only (honest limitation).
-pub fn exchange_v4_counted(
+pub fn exchange_v4_counted<S: Read + Write>(
     node: &Arc<Mutex<Node>>,
     sec: Option<&SecurityCtx>,
-    stream: TcpStream,
+    stream: S,
     active: bool,
 ) -> Result<(String, ContactCounts), SessionError> {
     let local_eid = node.lock().unwrap().eid();
@@ -401,10 +451,10 @@ pub fn exchange_v4_counted(
 
 /// Exchange bundles over TCPCLv4 with optional contact logging
 /// (kind Peer). Logging is best-effort and never fails the session.
-pub fn exchange_v4_logged(
+pub fn exchange_v4_logged<S: Read + Write>(
     node: &Arc<Mutex<Node>>,
     sec: Option<&SecurityCtx>,
-    stream: TcpStream,
+    stream: S,
     active: bool,
     log: Option<&Arc<Mutex<ContactLog>>>,
 ) -> Result<String, SessionError> {
@@ -426,13 +476,94 @@ pub fn exchange_v4_logged(
 
 /// Exchange bundles with a peer over a full RFC 9174 TCPCLv4 session.
 /// Compatibility wrapper around [`exchange_v4_counted`].
-pub fn exchange_v4(
+pub fn exchange_v4<S: Read + Write>(
     node: &Arc<Mutex<Node>>,
     sec: Option<&SecurityCtx>,
-    stream: TcpStream,
+    stream: S,
     active: bool,
 ) -> Result<String, SessionError> {
     exchange_v4_counted(node, sec, stream, active).map(|(peer_eid, _)| peer_eid)
+}
+
+
+/// Phase 30: decode a TLS pin specification — either 64 hex
+/// characters (the SHA-256 of the peer's leaf certificate DER) or
+/// "@path/cert.pem" (the pin is computed from the PEM file). Used
+/// by the CLI `--tls-pin` flag and `DaemonConfig::tls_client`.
+#[cfg(feature = "tls")]
+pub fn tls_pin_from_spec(spec: &str) -> Result<[u8; 32], String> {
+    if let Some(path) = spec.strip_prefix('@') {
+        let pem = std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot read TLS certificate {path}: {e}"))?;
+        cert_pin(&pem).map_err(|e| format!("cannot pin certificate: {e}"))
+    } else {
+        let hex = spec.trim();
+        if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err("TLS pin must be 64 hex characters or @cert.pem".to_string());
+        }
+        let mut pin = [0u8; 32];
+        for i in 0..32 {
+            pin[i] = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16)
+                .map_err(|_| "bad hex in TLS pin".to_string())?;
+        }
+        Ok(pin)
+    }
+}
+
+/// Phase 30: serve one accepted stream as a TLS-wrapped TCPCLv4
+/// contact (accept side). Logging mirrors the plain contact path.
+#[cfg(feature = "tls")]
+fn serve_tls_contact(
+    node: &Arc<Mutex<Node>>,
+    sec: Option<&SecurityCtx>,
+    setup: &TlsServerSetup,
+    stream: TcpStream,
+    log: &Option<Arc<Mutex<ContactLog>>>,
+) {
+    match setup.upgrade(stream) {
+        Ok(tls) => match exchange_v4_counted(node, sec, tls, false) {
+            Ok((peer, counts)) => {
+                println!("[daemon] TLS contact from {peer}: sent={} received={}", counts.sent, counts.received);
+                log_contact(log, &peer, Direction::Incoming, true, counts, Kind::Peer);
+            }
+            Err(e) => {
+                eprintln!("[daemon] TLS contact failed: {e}");
+                log_contact(log, "unknown", Direction::Incoming, false, ContactCounts::default(), Kind::Peer);
+            }
+        },
+        Err(e) => {
+            eprintln!("[daemon] TLS handshake failed: {e}");
+            log_contact(log, "unknown", Direction::Incoming, false, ContactCounts::default(), Kind::Peer);
+        }
+    }
+}
+
+/// Phase 30: run one outgoing contact over TLS (dial side).
+#[cfg(feature = "tls")]
+fn tls_sync_one(
+    node: &Arc<Mutex<Node>>,
+    sec: Option<&SecurityCtx>,
+    setup: &TlsClientSetup,
+    stream: TcpStream,
+    addr: &str,
+    log: &Option<Arc<Mutex<ContactLog>>>,
+) {
+    match setup.upgrade(stream) {
+        Ok(tls) => match exchange_v4_counted(node, sec, tls, true) {
+            Ok((peer, counts)) => {
+                println!("[daemon] TLS sync with {peer}: sent={} received={}", counts.sent, counts.received);
+                log_contact(log, &peer, Direction::Outgoing, true, counts, Kind::Peer);
+            }
+            Err(e) => {
+                eprintln!("[daemon] TLS sync failed: {e}");
+                log_contact(log, addr, Direction::Outgoing, false, ContactCounts::default(), Kind::Peer);
+            }
+        },
+        Err(e) => {
+            eprintln!("[daemon] TLS handshake with {addr} failed: {e}");
+            log_contact(log, addr, Direction::Outgoing, false, ContactCounts::default(), Kind::Peer);
+        }
+    }
 }
 
 fn serve(
@@ -440,14 +571,23 @@ fn serve(
     sec: Option<Arc<SecurityCtx>>,
     listener: TcpListener,
     log: Option<Arc<Mutex<ContactLog>>>,
+    _tls_server: TlsServerOpt,
 ) {
     for stream in listener.incoming() {
-        let Ok(mut stream) = stream else { continue };
+        let Ok(stream) = stream else { continue };
         let node = node.clone();
         let sec = sec.clone();
         let log = log.clone();
         std::thread::spawn(move || {
             let res = sec.as_ref().map(|s| s.as_ref());
+            #[cfg(feature = "tls")]
+            {
+                if let Some(setup) = _tls_server.as_ref() {
+                    serve_tls_contact(&node, res, setup, stream, &log);
+                    return;
+                }
+            }
+            let mut stream = stream;
             match exchange_counted(&node, res, &mut stream) {
                 Ok((peer, counts)) => {
                     log_contact(&log, &peer.as_uri(), Direction::Incoming, true, counts, Kind::Peer)
@@ -467,12 +607,21 @@ fn sync_peers(
     peers: Vec<String>,
     interval: Duration,
     log: Option<Arc<Mutex<ContactLog>>>,
+    _tls_client: TlsClientOpt,
 ) {
     loop {
         for addr in &peers {
-            if let Ok(mut stream) = TcpStream::connect(addr) {
+            if let Ok(stream) = TcpStream::connect(addr) {
+                let mut stream = stream;
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
                 let res = sec.as_ref().map(|s| s.as_ref());
+                #[cfg(feature = "tls")]
+                {
+                    if let Some(setup) = _tls_client.as_ref() {
+                        tls_sync_one(&node, res, setup, stream, addr, &log);
+                        continue;
+                    }
+                }
                 match exchange_counted(&node, res, &mut stream) {
                     Ok((peer, counts)) => {
                         log_contact(&log, &peer.as_uri(), Direction::Outgoing, true, counts, Kind::Peer)
@@ -516,12 +665,60 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<()> {
         },
         None => None,
     };
+    #[cfg(feature = "tls")]
+    let tls_server_opt: TlsServerOpt = match &cfg.tls_server {
+        Some(pem) => match TlsServerSetup::from_pem(&pem.cert_chain_pem, &pem.key_pem) {
+            Ok(s) => Some(Arc::new(s)),
+            Err(e) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("TLS server setup failed: {e}"),
+                ));
+            }
+        },
+        None => None,
+    };
+    #[cfg(feature = "tls")]
+    let tls_client_opt: TlsClientOpt = match &cfg.tls_client {
+        Some(pin) => match tls_pin_from_spec(&pin.pin_spec) {
+            Ok(p) => match TlsClientSetup::from_pin(p, &pin.server_name) {
+                Ok(s) => Some(Arc::new(s)),
+                Err(e) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("TLS client setup failed: {e}"),
+                    ));
+                }
+            },
+            Err(e) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("TLS pin: {e}"),
+                ));
+            }
+        },
+        None => None,
+    };
+    #[cfg(not(feature = "tls"))]
+    let tls_server_opt: TlsServerOpt = {
+        if cfg.tls_server.is_some() || cfg.tls_client.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "TLS requested but this binary was built without the \"tls\" cargo feature",
+            ));
+        }
+        None
+    };
+    #[cfg(not(feature = "tls"))]
+    let tls_client_opt: TlsClientOpt = None;
+
     let node = Arc::new(Mutex::new(node));
     let listener = TcpListener::bind(&cfg.listen)?;
-    println!("[daemon] listening on {} (security {}, TOFU enforcement {}, contact log {})", cfg.listen,
+    println!("[daemon] listening on {} (security {}, TOFU enforcement {}, contact log {}, tls {})", cfg.listen,
         if sec.is_some() { "ON — sign + TOFU key learning + verify" } else { "OFF" },
         if sec.is_some() && cfg.enforce_tofu { "ON" } else { "OFF" },
-        if contact_log.is_some() { "ON" } else { "OFF" });
+        if contact_log.is_some() { "ON" } else { "OFF" },
+        if tls_server_opt.is_some() || tls_client_opt.is_some() { "ON" } else { "off" });
 
     {
         let sync_node = node.clone();
@@ -529,7 +726,7 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<()> {
         let interval = cfg.sync_interval;
         let sec = sec.clone();
         let log = contact_log.clone();
-        std::thread::spawn(move || sync_peers(sync_node, sec, peers, interval, log));
+        std::thread::spawn(move || sync_peers(sync_node, sec, peers, interval, log, tls_client_opt));
     }
 
     {
@@ -545,7 +742,7 @@ pub fn run(cfg: DaemonConfig) -> std::io::Result<()> {
         });
     }
 
-    serve(node, sec, listener, contact_log);
+    serve(node, sec, listener, contact_log, tls_server_opt);
     Ok(())
 }
 
@@ -1139,5 +1336,135 @@ mod tests {
         // Legacy mode still accepts them.
         let sec_lenient = SecurityCtx { enforce_tofu: false, ..sec_ctx() };
         assert!(secured_receive(&node_b, Some(&sec_lenient), &signed.encode()).unwrap().is_some());
+    }
+}
+
+#[cfg(feature = "tls")]
+mod tls_tests {
+    use super::*;
+    use dtn_tcpcl::v4_tls::cert_pin;
+
+    /// Fresh self-signed certificate for "localhost" (test-only).
+    fn test_cert() -> (String, String) {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let params =
+            rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        let cert = params.self_signed(&key).unwrap();
+        (cert.pem(), key.serialize_pem())
+    }
+
+    #[test]
+    fn tls_contact_delivers_bundle_and_counts() {
+        let (cert_pem, key_pem) = test_cert();
+        let server_setup = Arc::new(TlsServerSetup::from_pem(&cert_pem, &key_pem).unwrap());
+        let client_setup = TlsClientSetup::pinned(&cert_pem, "localhost").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = std::thread::spawn(move || {
+            let node = Arc::new(Mutex::new(
+                Node::open(2, &PathBuf::from(":memory:"), Strategy::Epidemic).unwrap()));
+            node.lock().unwrap().send(Eid::ipn(1, 0), b"tls reply".to_vec(), 3600).unwrap();
+            let (stream, _) = listener.accept().unwrap();
+            let tls = server_setup.upgrade(stream).unwrap();
+            exchange_v4_counted(&node, None, tls, false).unwrap()
+        });
+
+        let node_a = Arc::new(Mutex::new(
+            Node::open(1, &PathBuf::from(":memory:"), Strategy::Epidemic).unwrap()));
+        node_a.lock().unwrap().send(Eid::ipn(2, 0), b"tls request".to_vec(), 3600).unwrap();
+        let stream = TcpStream::connect(addr).unwrap();
+        let tls = client_setup.upgrade(stream).unwrap();
+        let (peer, counts) = exchange_v4_counted(&node_a, None, tls, true).unwrap();
+        assert!(peer.contains("ipn:2.0"), "peer EID comes from the TCPCLv4 handshake");
+        assert_eq!(counts.sent, 1);
+        assert_eq!(counts.received, 1);
+
+        let (_, server_counts) = server.join().unwrap();
+        assert_eq!(server_counts.sent, 1);
+        assert_eq!(server_counts.received, 1);
+    }
+
+    #[test]
+    fn tls_contact_with_signed_bundles_and_keyring() {
+        let (cert_pem, key_pem) = test_cert();
+        let server_setup = Arc::new(TlsServerSetup::from_pem(&cert_pem, &key_pem).unwrap());
+        let client_setup =
+            TlsClientSetup::from_pin(cert_pin(&cert_pem).unwrap(), "localhost").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (ktx, krx) = std::sync::mpsc::channel::<Vec<u8>>();
+
+        let server = std::thread::spawn(move || {
+            let node_b = Arc::new(Mutex::new(
+                Node::open(2, &PathBuf::from(":memory:"), Strategy::Epidemic).unwrap()));
+            ktx.send(node_b.lock().unwrap().identity.public_key().as_bytes().to_vec()).unwrap();
+            let a_key = krx.recv().unwrap();
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&a_key);
+            let a_vk = ed25519_dalek::VerifyingKey::from_bytes(&arr).unwrap();
+            let sec_b = SecurityCtx {
+                keyring: Arc::new(Mutex::new(Keyring::open_in_memory().unwrap())),
+                sign_outbound: true,
+                enforce_tofu: true,
+                pending_rotation: None,
+            };
+            sec_b.keyring.lock().unwrap().put("ipn:1.0", &a_vk).unwrap();
+            node_b.lock().unwrap().send(Eid::ipn(1, 0), b"signed over tls".to_vec(), 3600).unwrap();
+            let (stream, _) = listener.accept().unwrap();
+            let tls = server_setup.upgrade(stream).unwrap();
+            exchange_v4_counted(&node_b, Some(&sec_b), tls, false).unwrap()
+        });
+
+        let node_a = Arc::new(Mutex::new(
+            Node::open(1, &PathBuf::from(":memory:"), Strategy::Epidemic).unwrap()));
+        node_a.lock().unwrap().send(Eid::ipn(2, 0), b"signed request".to_vec(), 3600).unwrap();
+        let b_key = krx.recv().unwrap();
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&b_key);
+        let b_vk = ed25519_dalek::VerifyingKey::from_bytes(&arr).unwrap();
+        let sec_a = SecurityCtx {
+            keyring: Arc::new(Mutex::new(Keyring::open_in_memory().unwrap())),
+            sign_outbound: true,
+            enforce_tofu: true,
+            pending_rotation: None,
+        };
+        sec_a.keyring.lock().unwrap().put("ipn:2.0", &b_vk).unwrap();
+        let stream = TcpStream::connect(addr).unwrap();
+        let tls = client_setup.upgrade(stream).unwrap();
+        let (_, counts) = exchange_v4_counted(&node_a, Some(&sec_a), tls, true).unwrap();
+        assert_eq!(counts.sent, 1);
+        assert_eq!(counts.received, 1);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn tls_wrong_pin_fails_closed() {
+        let (cert_pem, key_pem) = test_cert();
+        let (other_pem, _) = test_cert();
+        let server_setup = Arc::new(TlsServerSetup::from_pem(&cert_pem, &key_pem).unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            assert!(server_setup.upgrade(stream).is_err(),
+                "the server must fail the handshake against a wrong pin");
+        });
+        let client_setup = TlsClientSetup::pinned(&other_pem, "localhost").unwrap();
+        let stream = TcpStream::connect(addr).unwrap();
+        assert!(client_setup.upgrade(stream).is_err(),
+            "the client must fail closed against a certificate it did not pin");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn tls_pin_spec_roundtrip() {
+        let (cert_pem, _) = test_cert();
+        let pin = cert_pin(&cert_pem).unwrap();
+        let hex: String = pin.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(tls_pin_from_spec(&hex).unwrap(), pin);
+        assert!(tls_pin_from_spec("zz").is_err());
+        assert!(tls_pin_from_spec("").is_err());
     }
 }

@@ -27,9 +27,8 @@
 //!
 //! Honest scope: RFC 9174 section 4.2 discovery of TLS support over
 //! well-known ports and client-certificate authentication (mutual
-//! TLS) are future work; the pin is checked per connection and the
-//! daemon CLI wiring is future work — the layer is consumed
-//! programmatically today.
+//! TLS) are future work; the pin is checked per connection; the
+//! daemon/CLI wiring lives in dtn-daemon (Phase 30).
 
 use std::io;
 use std::net::TcpStream;
@@ -135,7 +134,13 @@ impl TlsClientSetup {
     /// verifier the name itself carries no trust decision, but it must
     /// still be a valid DNS name or IP).
     pub fn pinned(cert_pem: &str, server_name: &str) -> Result<Self, TlsError> {
-        let pin = cert_pin(cert_pem)?;
+        Self::from_pin(cert_pin(cert_pem)?, server_name)
+    }
+
+    /// Pin the peer to a raw SHA-256 leaf-certificate fingerprint
+    /// (e.g. the hex pin an operator recorded out of band; see
+    /// `dtn_daemon::tls_pin_from_spec` for the hex/@pem decoding).
+    pub fn from_pin(pin: [u8; 32], server_name: &str) -> Result<Self, TlsError> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let verifier = Arc::new(PinnedVerifier {
             pin,

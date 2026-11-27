@@ -24,3 +24,7 @@ jobs:
         run: cargo test -p dtn-tcpcl --features tls
       - name: Clippy (TCPCLv4 TLS feature)
         run: cargo clippy -p dtn-tcpcl --all-targets --features tls -- -D warnings
+      - name: Tests (daemon TLS wiring)
+        run: cargo test -p dtn-daemon --features tls
+      - name: Clippy (daemon TLS wiring)
+        run: cargo clippy -p dtn-daemon --all-targets --features tls -- -D warnings

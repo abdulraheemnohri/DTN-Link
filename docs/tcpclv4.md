@@ -73,13 +73,35 @@ the transport-level analogue of the keyring's trust-on-first-use pin
 of an Ed25519 key. Bundle-layer authentication (BPSec BIB over the
 keyring) remains the application-level identity check.
 
+## Daemon and CLI wiring (Phase 30)
+
+The daemon consumes the TLS layer directly, behind the cargo feature
+`tls` (enable with `cargo build -p dtn-link-cli --features tls`):
+
+    # Node B — accept TLS contacts (PEM certificate chain + key)
+    dtn-link daemon --listen 0.0.0.0:4556 --tls-cert node-b.pem --tls-key node-b-key.pem
+
+    # Node A — dial B over TLS, pinning B's certificate
+    dtn-link daemon --listen 0.0.0.0:4557 --peers node-b.example.net:4556 \
+        --tls-pin 9f86d081884c7d65... --tls-name node-b.example.net
+
+- `--tls-cert <pem>` + `--tls-key <pem>` — accept side: every
+  incoming contact is upgraded to TLS before the contact header
+  (RFC 9174 section 4.4) and runs as a full TCPCLv4 session.
+- `--tls-pin <hex|@cert.pem>` — dial side: outgoing contacts dial
+  TLS and pin the peer certificate to the SHA-256 fingerprint (64
+  hex characters, or `@cert.pem` to compute the pin from a PEM
+  file; `dtn_daemon::tls_pin_from_spec`). `--tls-name` sets the
+  TLS server name (SNI), defaulting to `localhost`.
+- Fail closed: TLS flags on a binary built without the `tls`
+  feature abort the daemon instead of silently downgrading the
+  contacts to plain TCP.
+
 ## Not implemented yet (honest scope)
 
 - Well-known-port TLS discovery (RFC 9174 section 4.4 says nodes
   SHOULD listen on a TLS-capable port; operators choose the port) and
   client-certificate (mutual TLS) authentication.
-- Daemon/CLI wiring of the TLS feature (the layer is consumed
-  programmatically today).
 - Transfer/session extension items (sections 4.8 and 5.2.5).
 - Per-segment XFER_ACKs and reactive fragmentation on partially
   acknowledged transfers (the receiver acknowledges only the

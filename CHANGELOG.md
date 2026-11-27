@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.29.0 (2026-11-27)
+
+Phase 30 — daemon/CLI wiring of TLS contacts (RFC 9174 section
+4.4), the first "Next" item of the Phase 29 roadmap. Everything
+stays behind the cargo feature `tls`.
+
+- dtn-daemon:
+  - DaemonConfig::tls_server (TlsServerPem: PEM certificate chain
+    + private key) — accepted incoming contacts are TLS-wrapped
+    TCPCLv4 sessions (TLS handshake first, contact header second).
+  - DaemonConfig::tls_client (TlsPeerPin: pin spec + server name)
+    — outgoing peer contacts dial TLS with a pinned certificate.
+    The pin spec is 64 hex characters (SHA-256 of the peer leaf
+    DER) or "@cert.pem" (computed from a PEM file); helper
+    dtn_daemon::tls_pin_from_spec.
+  - The v4 exchange functions are now generic over the stream
+    type, so the same contact code drives plain TCP, TLS streams
+    and any other Read + Write transport.
+  - Fail closed: TLS config on a binary built without the "tls"
+    feature is a startup error, not a silent downgrade.
+- dtn-tcpcl::v4_tls: TlsClientSetup::from_pin(raw 32-byte pin,
+  name) for operators who record the fingerprint out of band;
+  pinned() is now a thin wrapper over it.
+- cli: dtn-link daemon gains --tls-cert/--tls-key (accept side)
+  and --tls-pin/--tls-name (dial side); usage text updated.
+- 4 new feature-gated tests over real loopback TLS: a full TLS
+  contact with counted bundles both ways, a signed-bundle contact
+  with pre-exchanged keyring keys, a wrong-pin contact failing
+  closed on both sides, and pin-spec round-tripping.
+- CI: dtn-daemon tests + clippy now also run with --features tls.
+- docs: tcpclv4.md daemon/CLI wiring section, README status +
+  build + standards lines + TLS quick start, architecture.md
+  Phase 30 + roadmap; workspace bumped to 0.29.0.
+- Honest scope: mutual TLS (client certificates) and
+  well-known-port TLS discovery remain future work.
+
 ## 0.28.0 (2026-11-26)
 
 Phase 29 — TLS session security for the RFC 9174 TCPCLv4 session

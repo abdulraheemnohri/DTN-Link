@@ -9,7 +9,7 @@ without requiring a SIM card, cellular subscription or Wi-Fi router for every
 communication. It uses Bundle Protocol v7 (RFC 9171), store-carry-forward
 routing, modular physical transport adapters and optional internet gateways.
 
-## Status: Phases 1-29 (core, transports, security, adapters, gateways, diagnostics, federation, apps + attachments + read receipts, ffi, desktop + android + ios shells, TLE pass prediction, TCPCLv4 multi-segment transfers, TCPCLv4 TLS)
+## Status: Phases 1-30 (core, transports, security, adapters, gateways, diagnostics, federation, apps + attachments + read receipts, ffi, desktop + android + ios shells, TLE pass prediction, TCPCLv4 multi-segment transfers, TCPCLv4 TLS, TLS daemon/CLI wiring)
 
 | Component | Status |
 |---|---|
@@ -26,6 +26,7 @@ routing, modular physical transport adapters and optional internet gateways.
 | Persistent node identity across restarts | implemented + tested (crates/dtn-core) |
 | Full RFC 9174 TCPCLv4 session protocol (handshake, keepalive, acked XFER incl. chunked multi-segment transfers) | implemented + tested (crates/dtn-tcpcl::v4) |
 | TCPCLv4 TLS session security (RFC 9174 §4.4, TOFU certificate pinning, cargo feature "tls") | implemented + tested (crates/dtn-tcpcl::v4_tls) |
+| TLS wiring: daemon accept side + pinned dial-side contacts (`dtn-link daemon --tls-cert/--tls-key/--tls-pin/--tls-name`, cargo feature "tls") | implemented + tested (crates/dtn-daemon) |
 | Modular transport adapters: framing codecs + generic stream exchange | implemented + tested (crates/dtn-transport) |
 | KISS framing for LoRa TNCs / serial radio modems | implemented + tested (crates/dtn-transport::kiss) |
 | Serial-port hardware glue (cargo feature "serial") | implemented, feature-gated |
@@ -57,9 +58,11 @@ For LoRa TNC / serial radio hardware support:
 
     cargo build -p dtn-transport --features serial
 
-For TCPCLv4 TLS session security (RFC 9174 §4.4):
+For TCPCLv4 TLS session security (RFC 9174 §4.4), incl. daemon/CLI wiring:
 
     cargo test -p dtn-tcpcl --features tls
+    cargo test -p dtn-daemon --features tls
+    cargo build -p dtn-link-cli --features tls   # enables dtn-link daemon --tls-*
 
 For the platform FFI library (Android/iOS/desktop UI shells):
 
@@ -112,6 +115,16 @@ For the iOS shell (Phase 22) — Swift bridge + SwiftUI app:
     dtn-link tle plan iss.tle 52.52 13.40 gs.example.net:4556 10 48 > pass-plan.txt
     # pass-plan.txt is a ContactPlan for SatelliteGateway::new(ContactPlan::parse(...))
 
+## Quick start: two nodes over TLS (feature "tls")
+
+    # Node B — accepts TLS contacts (RFC 9174 §4.4: TLS before the contact header)
+    dtn-link daemon --listen 0.0.0.0:4556 --tls-cert node-b.pem --tls-key node-b-key.pem
+
+    # Node A — dials B over TLS, pinning B's certificate fingerprint
+    dtn-link daemon --listen 0.0.0.0:4557 --peers 127.0.0.1:4556 \
+        --tls-pin $(openssl x509 -in node-b.pem -outform DER | sha256sum | cut -d' ' -f1) \
+        --tls-name localhost
+
 ## Architecture
 
 See [docs/architecture.md](docs/architecture.md),
@@ -132,7 +145,7 @@ See [docs/architecture.md](docs/architecture.md),
 - RFC 9171 — Bundle Protocol v7
 - RFC 9172 — Bundle Protocol Security (BIB integrity block implemented; Ed25519 context)
 - RFC 9173 — Default Security Contexts (BIB-HMAC-SHA2 context id 1 and BCB-AES-GCM context id 2 implemented in crates/dtn-bpsec::rfc9173)
-- RFC 9174 — TCP Convergence Layer v4 (TCPCLv4 session protocol implemented: SESS handshake, KEEPALIVE, acked XFER incl. multi-segment transfers; TLS §4.4 implemented in crates/dtn-tcpcl::v4_tls with TOFU certificate pinning, cargo feature "tls")
+- RFC 9174 — TCP Convergence Layer v4 (TCPCLv4 session protocol implemented: SESS handshake, KEEPALIVE, acked XFER incl. multi-segment transfers; TLS §4.4 implemented in crates/dtn-tcpcl::v4_tls with TOFU certificate pinning; daemon accept side + pinned dial-side contacts wired in crates/dtn-daemon, cargo feature "tls")
 - KISS — LoRa TNC / serial radio modem framing (implemented in crates/dtn-transport)
 - NORAD TLE — two-line element sets for satellite pass prediction (implemented in crates/dtn-gateway::tle)
 
